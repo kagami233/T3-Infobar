@@ -4,8 +4,6 @@ import path from "node:path";
 
 const GEMINI_CONTEXT_WINDOW = 1_000_000;
 const GEMINI_COMPACT_LIMIT = 800_000; // 80% of 1M context window
-const ROLLING_WINDOW_SECONDS = 5 * 3600; // 5-hour rolling quota window
-const DEFAULT_WINDOW_TOKEN_BUDGET = 5_000_000; // 5M billed/weighted tokens per 5h rolling window default
 
 const numeric = v => typeof v === "number" && Number.isFinite(v) && v >= 0;
 
@@ -47,10 +45,8 @@ export function formatGeminiModelBadge(rawModel) {
 export function parseGeminiTranscript(text, {
   threadId = null,
   conversationId = null,
-  now = Date.now(),
   contextWindowTokens = GEMINI_CONTEXT_WINDOW,
   compactLimitTokens = GEMINI_COMPACT_LIMIT,
-  rollingWindowTokenBudget = DEFAULT_WINDOW_TOKEN_BUDGET,
 } = {}) {
   const lines = String(text).split("\n");
   let model = null;
@@ -66,10 +62,6 @@ export function parseGeminiTranscript(text, {
   let turnOutputTokens = 0;
   let lastCompletedTurnTps = null;
   let active = false;
-
-  const windowStartMs = now - ROLLING_WINDOW_SECONDS * 1000;
-  let rollingWeightedTokens = 0;
-  let oldestWindowStepMs = null;
 
   for (const rawLine of lines) {
     const line = rawLine.trim();
@@ -127,13 +119,6 @@ export function parseGeminiTranscript(text, {
       turnOutputTokens += outTok;
       if (Number.isFinite(ts)) {
         turnEndMs = ts;
-        if (ts >= windowStartMs) {
-          // Cached tokens count at 0.1x weight toward quota budget, fresh input + output at 1x/2x
-          rollingWeightedTokens += inTok + Math.round(cacheTok * 0.1) + outTok * 2;
-          if (oldestWindowStepMs === null || ts < oldestWindowStepMs) {
-            oldestWindowStepMs = ts;
-          }
-        }
       }
       active = Boolean(Array.isArray(step.tool_calls) && step.tool_calls.length > 0);
     } else if (Number.isFinite(ts) && turnStartMs !== null) {
@@ -161,11 +146,6 @@ export function parseGeminiTranscript(text, {
   const compactRemainingPercent = compactRemainingTokens !== null
     ? Math.min(100, (compactRemainingTokens / compactLimitTokens) * 100)
     : null;
-
-  const usedPercent = Math.min(100, Math.round((rollingWeightedTokens / rollingWindowTokenBudget) * 1000) / 10);
-  const resetsAt = oldestWindowStepMs !== null
-    ? Math.floor((oldestWindowStepMs + ROLLING_WINDOW_SECONDS * 1000) / 1000)
-    : Math.floor((now + ROLLING_WINDOW_SECONDS * 1000) / 1000);
 
   const modelBadge = formatGeminiModelBadge(model);
 
@@ -196,17 +176,9 @@ export function parseGeminiTranscript(text, {
     compactionCount,
     historyComplete: true,
     averageOutputTps,
-    usageResets: [
-      {
-        limitId: "gemini",
-        limitName: "Gemini 5h",
-        window: "primary",
-        windowMinutes: 300,
-        usedPercent,
-        resetsAt,
-        observedAt: updatedAt ?? new Date(now).toISOString(),
-      },
-    ],
+    // A conversation transcript cannot measure an account-wide allowance.
+    // Read quota windows from the selected T3 provider's usageLimits instead.
+    usageResets: [],
     active,
     status: contextUsedTokens !== null ? "ok" : "unavailable",
     source: "antigravity-transcript",
@@ -227,7 +199,7 @@ export class GeminiTranscriptReader {
         cwd: this.providersRoot,
       })) {
         const fullPath = path.join(this.providersRoot, entry);
-        const parts = entry.split(path.sep);
+        const parts = entry.split(/[\\/]/);
         const brainIdx = parts.indexOf("brain");
         const conversationId = brainIdx >= 0 ? parts[brainIdx + 1]?.toLowerCase() : null;
         try {
@@ -247,6 +219,7 @@ export class GeminiTranscriptReader {
       throw new Error("未找到本地 Antigravity / Google Gemini 会话日志 (transcript.jsonl)。");
     }
     const exact = normalized ? files.find(f => f.conversationId === normalized) : null;
+    if (normalized && !exact) throw new Error("当前聊天没有匹配的 Gemini 会话记录。");
     const chosen = exact ?? files[0];
     const text = await fs.readFile(chosen.file, "utf8");
     return parseGeminiTranscript(text, {
