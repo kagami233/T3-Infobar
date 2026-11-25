@@ -33,9 +33,11 @@ export function formatMetricsForTheme(snapshot = {}, account = null, now = Date.
   const budget = ref?.kind === "calibrated-compaction-estimate" && numeric(ref.remainingPercent)
     ? `≈${Math.floor(ref.remainingPercent)}%` : "—";
 
-  const resets = Array.isArray(account?.usageResets) && account.usageResets.length
+  const matchingAccount = account && (!account.provider || account.provider === snapshot.provider) &&
+    (!account.sourceInstanceId || !snapshot.providerInstanceId || account.sourceInstanceId === snapshot.providerInstanceId);
+  const resets = matchingAccount && Array.isArray(account.usageResets) && (!isGemini || account.provider === "gemini")
     ? account.usageResets
-    : Array.isArray(snapshot?.usageResets) ? snapshot.usageResets : [];
+    : !isGemini && Array.isArray(snapshot?.usageResets) ? snapshot.usageResets : [];
   const primary = resets[0] ?? null;
   const remainingPercent = primary && numeric(primary.usedPercent) && primary.resetsAt * 1000 > now
     ? Math.max(0, Math.min(100, Math.round(100 - primary.usedPercent)))

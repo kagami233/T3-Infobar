@@ -90,7 +90,7 @@
 
   function cardTooltipText() {
     const count = resetCardCount();
-    return `重置卡:${count === null ? "—" : `${count}张`}`;
+    return `重置卡:${count === null ? "—" : `${count}张`}${accountSnapshot?.sourceDescription ? `\n${accountSnapshot.sourceDescription}` : ""}`;
   }
 
   function composerThread(composer) {
@@ -232,11 +232,17 @@
   }
   function resetWindows() {
     const source = freshAccount() && Array.isArray(accountSnapshot.usageResets)
-      ? accountSnapshot.usageResets : snapshot?.usageResets;
+      ? accountSnapshot.usageResets : snapshot?.provider === "gemini" ? [] : snapshot?.usageResets;
     return (Array.isArray(source) ? source : []).filter(w =>
       numeric(w.resetsAt) && w.resetsAt > 0 && w.resetsAt * 1000 <= 8640000000000000);
   }
   function freshAccount() {
+    if (accountSnapshot?.threadId && accountSnapshot.threadId !== getThreadId()) return false;
+    if (accountSnapshot?.provider && accountSnapshot.provider !== snapshot?.provider) return false;
+    if (snapshot?.provider === "gemini" && accountSnapshot?.provider !== "gemini") return false;
+    if (accountSnapshot?.sourceInstanceId && snapshot?.providerInstanceId &&
+        accountSnapshot.sourceInstanceId !== snapshot.providerInstanceId) return false;
+    if (accountSnapshot?.model && accountSnapshot.model !== snapshot?.model) return false;
     const age = Date.now() - accountSnapshot?.observedAt;
     return Number.isFinite(age) && age >= 0 && age <= (accountSnapshot?.cached ? 7 * 86400000 : ACCOUNT_EXPIRY_MS);
   }
@@ -280,9 +286,13 @@
     }).join(" / ") : "—";
   }
   function resetMetric(stale = false) {
+    if (freshAccount() && accountSnapshot.usageState === "unsupported") {
+      metric("reset", "账户用量", "查看用量", accountSnapshot.sourceDescription);
+      return;
+    }
     const windows = stale ? [] : resetWindows();
     if (!windows.length) {
-      metric("reset", "用量重置", "—", "当前会话尚未提供可靠的账户用量重置时间和剩余额度。虚线圆环表示未知。");
+      metric("reset", "用量重置", "—", "");
       return;
     }
     const multipleBuckets = new Set(windows.map(w => w.limitId)).size > 1;
@@ -295,18 +305,13 @@
       const current = w.resetsAt * 1000 > Date.now();
       const remaining = current && numeric(w.usedPercent)
         ? Math.max(0, Math.min(100, 100 - w.usedPercent)) : null;
-      const quota = remaining !== null ? `剩余 ${Math.round(remaining * 10) / 10}%` : current ? "剩余额度未知" : "剩余额度等待更新";
-      const used = numeric(w.usedPercent) ? `；上次记录已用 ${w.usedPercent}%` : "";
-      const observedAt = Date.parse(w.observedAt);
-      const observed = Number.isFinite(observedAt) ? `；记录时间 ${clock.format(observedAt)}（北京时间）` : "";
-      const cached = accountSnapshot?.cached && Date.now() - accountSnapshot.observedAt > ACCOUNT_EXPIRY_MS
-        ? `；账户缓存，采集于 ${clock.format(accountSnapshot.observedAt)}（北京时间），等待后台更新` : "";
-      const detail = `${bucket ? `${bucket} · ` : ""}${windowLabel(w)}：${clock.format(w.resetsAt * 1000)}（北京时间）${used}${observed}${cached}`;
       const selected = deadline(w);
-      const value = `${multipleBuckets ? `${bucket || "用量"} ` : ""}${windows.length > 1 ? `${windowLabel(w)} ` : ""}${resetCountdown(selected.at)}`;
-      const cardDetail = selected.card ? `倒计时为最近可用重置卡到期时间：${clock.format(selected.at * 1000)}（北京时间）；早于本周期自然重置。卡片到期不会自动重置额度。\n` : "";
+      const sourceBadge = accountSnapshot?.sourceBadge ? `${accountSnapshot.sourceBadge} ` : "";
+      const value = snapshot?.provider === "gemini" ? resetCountdown(selected.at)
+        : `${sourceBadge}${multipleBuckets ? `${bucket || "用量"} ` : ""}${windows.length > 1 ? `${windowLabel(w)} ` : ""}${resetCountdown(selected.at)}`;
       metric("reset", selected.card ? "重置卡到期" : "用量重置", value,
-        `${cardDetail}${quota}。用量从顶部逆时针消耗，亮色圆环表示剩余额度，低于 20% 时变红；暗色表示已用，虚线表示未知或等待更新。\n自然重置 ${detail}\n账户额度按最近记录显示；到点后等待新记录确认，不代表已完成重置。`, remaining, selected.card);
+        selected.card ? `${clock.format(selected.at * 1000)}（北京时间）` : resetCountdown(selected.at),
+        remaining, selected.card);
     }
   }
   const icons = {
@@ -338,8 +343,11 @@
       budget: "剩余压缩余量",
       tier: "模型与思考档位",
     };
-    item.title = iconName === "reset"
-      ? `套餐剩余：${remainingPercent === null ? "—" : Math.round(remainingPercent) + "%"}；${card ? "重置卡到期时间" : "重置剩余时间"}：${value}`
+    item.title = iconName === "reset" && freshAccount() && accountSnapshot.usageState === "unsupported"
+      ? `查看账户用量\n${tooltip || ""}`
+      : iconName === "reset"
+      ? card ? tooltip
+        : `套餐剩余：${remainingPercent === null ? "—" : Math.round(remainingPercent) + "%"}；重置剩余时间：${tooltip || value}`
       : iconName === "tier" && tooltip
         ? tooltip
         : `${hoverNames[iconName] ?? label}：${value}`;
@@ -378,9 +386,24 @@
         icon.appendChild(path);
       }
     }
-    const number = document.createElement("span");
+    const usageLink = iconName === "reset" && freshAccount() &&
+      accountSnapshot.usageState === "unsupported" &&
+      accountSnapshot.usageUrl === "https://chatgpt.com/#settings/Usage";
+    const number = document.createElement(usageLink ? "a" : "span");
     number.className = "value";
     number.textContent = value;
+    if (usageLink) {
+      number.setAttribute("href", accountSnapshot.usageUrl);
+      number.setAttribute("target", "_blank");
+      number.setAttribute("rel", "noopener noreferrer");
+      number.style.textDecoration = "underline";
+      number.addEventListener?.("click", event => {
+        if (typeof window.desktopBridge?.openExternal === "function") {
+          event.preventDefault();
+          void window.desktopBridge.openExternal("https://chatgpt.com/#settings/Usage");
+        }
+      });
+    }
     if (iconName === "reset") {
       const wrap = document.createElement("span");
       wrap.className = "quota-wrap";
@@ -445,7 +468,7 @@
       metric("tier", "模型与思考档位", badgeValue, `模型与思考档位：${badgeValue}${rawModel ? `（${rawModel}）` : ""}`);
     } else {
       const cards = resetCardCount();
-      metric("cards", "可用重置卡", cards === null ? "—" : `${cards}张`, "当前账户尚未过期的可用 Codex 重置卡数量。");
+      metric("cards", "可用重置卡", cards === null ? "—" : `${cards}张`, `${accountSnapshot?.sourceDescription || ""}\n当前账户尚未过期的可用 Codex 重置卡数量。`);
     }
   }
 

@@ -162,6 +162,25 @@ test("mounts inside T3 [data-slot='composer-host'] and renders Codex-InfoBar met
   assert.match(text, /3张/);
 });
 
+test("unavailable shared quota offers the account usage page while keeping chat telemetry", () => {
+  const env = environment(`/threads/${THREAD}`);
+  env.api.update(codexSnapshot());
+  env.api.updateAccount({
+    observedAt: 1000, usageState: "unsupported",
+    usageUrl: "https://chatgpt.com/#settings/Usage",
+    usageResets: [], resetCardCount: null,
+    sourceDescription: "共享连接未提供数值。",
+  });
+  const bar = env.host.shadowRoot.children[1];
+  const usage = bar.children.find(x => x.getAttribute("data-metric") === "reset");
+  const cards = bar.children.find(x => x.getAttribute("data-metric") === "cards");
+  assert.equal(usage.children[1].tag, "a");
+  assert.equal(usage.children[1].getAttribute("href"), "https://chatgpt.com/#settings/Usage");
+  assert.equal(usage.children[1].textContent, "查看用量");
+  assert.equal(cards.children[1].textContent, "—");
+  assert.match(env.host.shadowRoot.content(), /24\.6 tok\/s/);
+});
+
 test("parseGeminiTranscript computes 1M window, 800k threshold, cache ratio, speed, and model badge", () => {
   assert.equal(formatGeminiModelBadge("gemini-4-argon-high"), "Argon·High");
   assert.equal(formatGeminiModelBadge("gemini-4-neon-xhigh"), "Neon·XHigh");
@@ -194,6 +213,49 @@ test("parseGeminiTranscript computes 1M window, 800k threshold, cache ratio, spe
   assert.ok(Math.abs(parsed.averageOutputTps - 136.4) < 1e-3);
   assert.equal(parsed.compactReference.limit, 800_000);
   assert.equal(Math.floor(parsed.compactReference.remainingPercent), 79);
+  assert.deepEqual(parsed.usageResets, []);
+});
+
+test("Gemini ignores estimated transcript quota and account data from another connection or model", () => {
+  const env = environment();
+  const gemini = codexSnapshot({ provider: "gemini", providerInstanceId: "antigravity", model: "gemini-4-neon",
+    modelBadge: "Neon·High", usageResets: [{ limitId: "gemini", usedPercent: 1, resetsAt: 400000 }] });
+  const account = { provider: "gemini", sourceInstanceId: "antigravity", threadId: THREAD,
+    model: "gemini-4-neon", observedAt: 1000, cached: true,
+    sourceDescription: "账户缓存及记录时间说明", usageResets: [
+      { limitId: "gemini", window: "primary", windowMinutes: 300, usedPercent: 99.2, resetsAt: 400000 },
+      { limitId: "gemini", window: "secondary", windowMinutes: 10080, usedPercent: 26, resetsAt: 500000 },
+    ] };
+  const resets = () => env.host.shadowRoot.children[1].children.filter(c => c.getAttribute("data-metric") === "reset");
+  env.api.updateAccount({ observedAt: 1000, usageResets: [{ limitId: "codex", usedPercent: 22, resetsAt: 400000 }] });
+  env.api.update(gemini);
+  assert.match(resets()[0].title, /套餐剩余：—/);
+  env.api.updateAccount(account);
+  assert.equal(resets().length, 2);
+  assert.match(resets()[0].title, /套餐剩余：1%/);
+  assert.match(resets()[1].title, /套餐剩余：74%/);
+  env.tick(90001);
+  env.api.update(gemini);
+  assert.match(resets()[0].title, /^套餐剩余：1%；重置剩余时间：[^\n]+$/);
+  assert.doesNotMatch(resets()[0].title, /缓存|记录时间/);
+  assert.equal(resets()[0].children[0].className, "quota-wrap");
+  assert.match(resets()[0].children[1].textContent, /^\d+天 /);
+  assert.doesNotMatch(resets().map(x => x.content()).join(" "), /缓存|5小时窗口|7天窗口/);
+  env.api.updateAccount({ ...account, usageResets: [{ ...account.usageResets[0], resetsAt: 0.5 }, account.usageResets[1]] });
+  assert.match(resets()[0].title, /等待更新/);
+  assert.match(resets()[1].title, /套餐剩余：74%/);
+  env.api.updateAccount(account);
+  env.api.update({ ...gemini, model: "gemini-4-carbon" });
+  assert.match(resets()[0].title, /套餐剩余：—/);
+  env.api.update(gemini);
+  env.api.updateAccount({ ...account, sourceInstanceId: "another-account" });
+  assert.match(resets()[0].title, /套餐剩余：—/);
+  env.api.updateAccount(account);
+  env.api.update(codexSnapshot());
+  assert.match(resets()[0].title, /套餐剩余：—/);
+  env.api.update(gemini);
+  env.navigate(`/threads/${OTHER}`);
+  assert.match(resets()[0].title, /套餐剩余：—/);
 });
 
 test("dual-engine renderer auto-switches slot 7 between Gemini model badge and Codex reset cards", () => {
@@ -263,6 +325,12 @@ test("low quota (<20%) turns quota ring red and preserves cards DOM node across 
   env.api.update(codexSnapshot({ averageOutputTps: 31.2 }));
   const cardsItemAfter = bar.children.find(c => c.getAttribute("data-metric") === "cards");
   assert.equal(cardsItemAfter, cardsItemBefore);
+  env.api.updateAccount({ observedAt: 1000, cached: true, resetCardCount: 2,
+    resetCards: [{ expiresAt: 200000 }],
+    usageResets: [{ limitId: "codex", usedPercent: 85, resetsAt: 400000 }],
+  });
+  const cardExpiry = bar.children.find(c => c.getAttribute("data-metric") === "reset");
+  assert.equal(cardExpiry.title, "1970/01/03 15:33（北京时间）");
 });
 
 test("buildT3Theme produces valid T3 Code theme JSON for both Gemini and Codex snapshots", () => {
@@ -274,4 +342,8 @@ test("buildT3Theme produces valid T3 Code theme JSON for both Gemini and Codex s
   assert.equal(theme.name, "Codex InfoBar");
   assert.match(theme.css, /\[data-chat-composer-form\]:not\(:has\(#t3-metrics-hud\)\)/);
   assert.match(theme.css, /Argon%C2%B7High/);
+  const untrusted = { ...s, usageResets: [{ usedPercent: 1, resetsAt: 400000 }] };
+  assert.equal(formatMetricsForTheme(untrusted, null, 1000).remainingPercent, null);
+  assert.equal(formatMetricsForTheme(untrusted, { provider: "codex", usageResets: [{ usedPercent: 22, resetsAt: 400000 }] }, 1000).remainingPercent, null);
+  assert.equal(formatMetricsForTheme(untrusted, { provider: "gemini", usageResets: [{ usedPercent: 99.2, resetsAt: 400000 }] }, 1000).remainingPercent, 1);
 });

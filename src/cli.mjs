@@ -9,12 +9,14 @@ import { Cdp, listTargets, port as defaultPort } from "./cdp.mjs";
 import { SnapshotCache } from "./snapshot-cache.mjs";
 import { addCompactionEstimate } from "./compaction-estimate.mjs";
 import { formatMetricsForTheme, buildT3Theme } from "./theme.mjs";
+import { resolveT3Session } from "./t3-session.mjs";
+import { createT3AccountReader } from "./t3-account.mjs";
 
 const here = new URL(".", import.meta.url);
 const args = process.argv.slice(2);
 const mode = args.shift() || "preview";
 const options = {
-  thread: process.env.T3_THREAD_ID || process.env.CODEX_THREAD_ID,
+  thread: process.env.T3CODE_THREAD_ID || process.env.T3_THREAD_ID || process.env.CODEX_THREAD_ID,
   engine: "auto", // auto | gemini | codex
   port: defaultPort,
   position: "inside",
@@ -41,6 +43,7 @@ if (!["auto", "gemini", "codex"].includes(options.engine)) {
 
 const codexReader = new RolloutReader();
 const geminiReader = new GeminiTranscriptReader();
+const mappedReaders = new Map();
 const renderer = (
   await Promise.all([
     fs.readFile(new URL("renderer.js", here), "utf8"),
@@ -50,6 +53,33 @@ const renderer = (
 const rendererRevision = createHash("sha256").update(renderer).digest("hex");
 
 async function resolveSnapshot(rawThreadId, client = null, previous = null) {
+  const binding = options.engine === "auto" ? resolveT3Session(rawThreadId) : null;
+  if (binding) {
+    try {
+      if (!binding.nativeId) throw new Error("当前聊天尚未创建原生会话记录。");
+      if (binding.provider === "codex") {
+        let reader = mappedReaders.get(binding.codexHome);
+        if (!reader) {
+          reader = new RolloutReader({ codexHome: binding.codexHome });
+          mappedReaders.set(binding.codexHome, reader);
+        }
+        const data = await reader.snapshot(validateThreadId(binding.nativeId));
+        return { ...await addCompactionEstimate(data, client, previous),
+          threadId: rawThreadId, nativeThreadId: binding.nativeId,
+          providerInstanceId: binding.providerInstanceId, provider: "codex" };
+      }
+      if (binding.provider === "antigravity" || binding.provider === "gemini") {
+        const data = await geminiReader.snapshot(binding.nativeId);
+        return { ...data, threadId: rawThreadId, nativeThreadId: binding.nativeId,
+          providerInstanceId: binding.providerInstanceId, provider: "gemini" };
+      }
+      throw new Error(`暂不支持此引擎：${binding.provider}`);
+    } catch (error) {
+      return { threadId: rawThreadId, providerInstanceId: binding.providerInstanceId,
+        provider: binding.provider === "antigravity" ? "gemini" : binding.provider,
+        status: "unavailable", warning: error.message };
+    }
+  }
   const isImportedCodex = typeof rawThreadId === "string" && IMPORT_CODEX.test(rawThreadId);
   if (options.engine === "codex" || (options.engine === "auto" && isImportedCodex)) {
     try {
@@ -68,7 +98,9 @@ async function resolveSnapshot(rawThreadId, client = null, previous = null) {
       const id = validateThreadId(rawThreadId);
       const data = await addCompactionEstimate(await codexReader.snapshot(id), client, previous);
       if (data?.status === "ok") return { ...data, provider: "codex" };
-    } catch {}
+    } catch (error) {
+      return { threadId: rawThreadId, provider: "codex", status: "unavailable", warning: error.message };
+    }
   }
 
   try {
@@ -157,6 +189,7 @@ async function preview() {
 
 async function attach() {
   const clients = new Map();
+  const readAccount = createT3AccountReader();
   const diskCache = new SnapshotCache();
   const sharedSnapshots = await diskCache.load();
   let stopping = false;
@@ -208,6 +241,15 @@ async function attach() {
             await client.evaluate("window.__CODEX_METRICS_ACCOUNT__?.tickAutoReset?.()");
             const id = await client.evaluate("window.__T3_METRICS_HUD__.getThreadId()");
             const data = await resolveSnapshot(id, client, id ? sharedSnapshots.get(id)?.snapshot : null);
+            if (data.providerInstanceId) {
+              const account = await readAccount(client, {
+                provider: data.provider, providerInstanceId: data.providerInstanceId,
+                model: data.model, threadId: id,
+              });
+              await client.evaluate(`window.__T3_METRICS_HUD__?.updateAccount(${JSON.stringify(account)})`);
+            } else {
+              await client.evaluate("window.__T3_METRICS_HUD__?.updateAccount(null)");
+            }
             const key = id || data.threadId;
             if (key) {
               sharedSnapshots.delete(key);
