@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="zh-CN" class="dark"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>T3 Code · Codex-InfoBar 状态条皮肤预览</title>
+<style>
+:root {
+  --background: #ffffff;
+  --foreground: #1f2328;
+  --muted-foreground: #656d76;
+  --card: #fcfcfc;
+  --border: #e2e4e8;
+  --accent: #3fb950;
+  --font-sans: -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+}
+html.dark {
+  --background: #191919;
+  --foreground: #e8e8e8;
+  --muted-foreground: #a6a6a6;
+  --card: #202020;
+  --border: #303030;
+  --accent: #5d7e68;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--background);color:var(--foreground);font:14px/1.6 var(--font-sans);transition:background .15s,color .15s}
+main{width:min(880px,calc(100% - 40px));margin:56px auto}
+header{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.title-row{display:flex;align-items:center;gap:12px}
+h1{font-size:22px;letter-spacing:-.4px;margin:0;font-weight:600}
+.badge{font-size:11px;padding:3px 9px;border:1px solid color-mix(in srgb,var(--accent) 55%,transparent);color:#9be8c2;background:color-mix(in srgb,var(--accent) 18%,transparent);border-radius:6px}
+html:not(.dark) .badge{color:#1a7f37}
+p{color:var(--muted-foreground);max-width:720px;margin:10px 0 0}
+.stage{margin-top:32px;padding:22px;background:var(--card);border:1px solid var(--border);border-radius:20px}
+.project{font-size:12px;color:var(--muted-foreground);padding:2px 10px 10px;display:flex;justify-content:space-between}
+[data-slot="composer-host"]{border-radius:20px;background:color-mix(in srgb,var(--foreground) 6%,var(--card));border:1px solid color-mix(in srgb,currentColor 14%,transparent);padding:14px 16px 6px;min-height:118px;display:flex;flex-direction:column;justify-content:space-between}
+textarea{width:100%;resize:none;border:0;background:none;color:var(--foreground);font:14px/1.6 inherit;outline:none;padding:2px 4px}
+.tools{display:flex;justify-content:space-between;align-items:center;color:var(--muted-foreground);font-size:12px;padding:8px 4px 10px}
+.pill{padding:3px 10px;border-radius:999px;border:1px solid color-mix(in srgb,currentColor 16%,transparent);background:color-mix(in srgb,currentColor 4%,transparent);font-size:11.5px}
+.send{border-radius:50%;background:#3e76cc;color:white;width:28px;height:28px;display:inline-flex;align-items:center;justify-content:center;font-size:16px}
+.settings{display:flex;gap:8px;margin-top:18px;align-items:center;flex-wrap:wrap}
+button{font:inherit;font-size:12px;border:1px solid var(--border);background:var(--card);color:var(--muted-foreground);border-radius:8px;padding:5px 12px;cursor:pointer}
+button[aria-pressed=true]{background:color-mix(in srgb,var(--accent) 22%,var(--card));border-color:var(--accent);color:var(--foreground)}
+</style></head><body><main>
+<header>
+  <div class="title-row"><h1>T3 Code × Codex-InfoBar 状态条皮肤</h1><span class="badge">原生主题 + CDP 动态 HUD 双模驱动</span></div>
+</header>
+<p>挂载于 T3 Code 输入框容器 <code>[data-slot="composer-host"]</code> 底部，实时展示平均输出速度、命中缓存、压缩次数、上下文余量、剩余压缩余量、逆时针套餐额度圆环（&lt;20% 变红）、重置倒计时与重置卡数量。</p>
+<section class="stage">
+  <div class="project"><span>▱ T3 Code Workspace · Codex-InfoBar Skin</span><span id="thread-label">Thread: de36c476-bb3d-4bfd-9f9c-6d9a62612706</span></div>
+  <div data-slot="composer-host" data-chat-composer-form="true">
+    <textarea class="composer-tiptap" rows="2" placeholder="在 T3 Code 输入框内输入指令，底部自动嵌入 Codex-InfoBar 状态条…" aria-label="T3 预览输入框"></textarea>
+    <div class="tools">
+      <span>＋ 附件　<span class="pill">Default</span></span>
+      <span id="model" class="pill">Gemini 4 Argon / Codex</span>
+      <span class="send">↑</span>
+    </div>
+  </div>
+</section>
+<div class="settings">
+  <span style="font-size:12px;color:var(--muted-foreground)">显示位置</span>
+  <button data-position="above" aria-pressed="false">输入框上方</button>
+  <button data-position="below" aria-pressed="false">输入框下方</button>
+  <button data-position="inside" aria-pressed="true">输入框内 (默认)</button>
+  <span style="font-size:12px;color:var(--muted-foreground);margin-left:12px">外观模式</span>
+  <button id="toggle-theme" aria-pressed="true">深色 / 浅色切换</button>
+  <button id="toggle-low-quota" aria-pressed="false">模拟低额度 (&lt;20% 变红)</button>
+</div>
+</main>
+<script src="./renderer.js"></script>
+<script>
+const hud = window.__T3_METRICS_HUD__;
+let lowQuota = false;
+document.querySelectorAll('[data-position]').forEach(button => button.addEventListener('click', () => {
+  hud.setPosition(button.dataset.position);
+  document.querySelectorAll('[data-position]').forEach(b => b.setAttribute('aria-pressed', String(b === button)));
+}));
+document.querySelector('#toggle-theme').addEventListener('click', (e) => {
+  document.documentElement.classList.toggle('dark');
+  e.currentTarget.setAttribute('aria-pressed', String(document.documentElement.classList.contains('dark')));
+});
+document.querySelector('#toggle-low-quota').addEventListener('click', (e) => {
+  lowQuota = !lowQuota;
+  e.currentTarget.setAttribute('aria-pressed', String(lowQuota));
+  refresh();
+});
+async function refresh() {
+  try {
+    const response = await fetch('./metrics', { cache: 'no-store' });
+    if (!response.ok) throw new Error('统计请求失败');
+    const snapshot = await response.json();
+    if (lowQuota && snapshot.accountUsage?.usageResets?.[0]) {
+      snapshot.accountUsage.usageResets[0].usedPercent = 86;
+    }
+    hud.updateAccount(snapshot.accountUsage ?? null);
+    hud.update(snapshot);
+    document.querySelector('#model').textContent = snapshot.model || 'Gemini 4 Argon / Codex';
+  } catch {}
+}
+refresh();
+setInterval(refresh, 2000);
+</script></body></html>
