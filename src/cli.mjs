@@ -16,6 +16,7 @@ import { createT3AccountReader } from "./t3-account.mjs";
 import { readT3Runtime, sessionKey } from "./t3-runtime.mjs";
 import { SharedQuotaReader } from "./shared-quota.mjs";
 import { RemoteMetricsReader, nativeQuotaAccount } from "./remote-metrics.mjs";
+import { applySidebarColors } from "./sidebar-colors.mjs";
 import { GeminiQuotaReader } from "./gemini-quota.mjs";
 
 const here = new URL(".", import.meta.url);
@@ -334,12 +335,15 @@ try {
     console.log(JSON.stringify(await resolveSnapshot(options.thread), null, 2));
   } else if (mode === "theme") {
     await generateThemeFile();
+  } else if (mode === "sidebar-colors") {
+    const { environments, backup } = await applySidebarColors(options.port);
+    console.log(`已为 ${environments} 个环境更新侧边栏配色。原主题备份：${backup}`);
   } else if (mode === "preview") {
     await preview();
   } else if (mode === "attach") {
     await attach();
   } else {
-    throw new Error("用法：node src/cli.mjs theme|preview|snapshot|attach|share-quota [--thread ID] [--engine auto|gemini|codex] [--position above|below|inside] [--port 9342]");
+    throw new Error("用法：node src/cli.mjs theme|sidebar-colors|preview|snapshot|attach|share-quota [--thread ID] [--engine auto|gemini|codex] [--position above|below|inside] [--port 9342]");
   }
 } catch (error) {
   console.error(error.message);
