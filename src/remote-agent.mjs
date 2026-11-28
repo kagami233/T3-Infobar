@@ -96,7 +96,7 @@ export async function collectThread(appThreadId, { t3Home = process.env.T3CODE_H
     });
   } else throw new Error("Unsupported native provider");
   const quotaSource = quotaSources.find(s => s.providerInstanceId === binding.providerInstanceId);
-  const nativeQuota = binding.provider !== "codex" && quotaSource ? await quotaReader.read(quotaSource) : null;
+  const nativeQuota = binding.provider !== "codex" && quotaSource ? await quotaReader.read(quotaSource, { t3Home }) : null;
   return { appThreadId, nativeThreadId: binding.nativeId, providerInstanceId: binding.providerInstanceId,
     nativeQuota,
     provider: binding.provider === "codex" ? "codex" : "gemini", model: binding.model ?? data.model,
@@ -139,6 +139,7 @@ export async function runAgent(configPath, { once = false, snapshotFile = "snaps
   do {
     const config = JSON.parse(await fs.readFile(configPath, "utf8"));
     const document = await collectDocument(config, Date.now(), { directory: path.dirname(configPath) });
+    if (!once) void nativeQuotaReader.maintainLogin(config.t3Home || process.env.T3CODE_HOME || path.join(os.homedir(), ".t3"));
     document.collectedAt = Date.now();
     const destination = path.join(path.dirname(configPath), snapshotFile);
     const temp = `${destination}.${randomUUID()}.tmp`;

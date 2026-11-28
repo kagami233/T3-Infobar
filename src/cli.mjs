@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
 import http from "node:http";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomBytes, createHash } from "node:crypto";
@@ -15,6 +16,7 @@ import { createT3AccountReader } from "./t3-account.mjs";
 import { readT3Runtime, sessionKey } from "./t3-runtime.mjs";
 import { SharedQuotaReader } from "./shared-quota.mjs";
 import { RemoteMetricsReader, nativeQuotaAccount } from "./remote-metrics.mjs";
+import { GeminiQuotaReader } from "./gemini-quota.mjs";
 
 const here = new URL(".", import.meta.url);
 const args = process.argv.slice(2);
@@ -208,6 +210,8 @@ async function preview() {
 async function attach() {
   const clients = new Map();
   const readAccount = createT3AccountReader();
+  const antigravity = new GeminiQuotaReader();
+  const t3Home = process.env.T3CODE_HOME || path.join(os.homedir(), ".t3");
   let quotaClient;
   const sharedQuota = new SharedQuotaReader({ file: options["shared-quota"],
     refreshSource: context => readAccount(quotaClient, context) });
@@ -230,6 +234,7 @@ async function attach() {
   console.log(`已启动 T3-InfoBar 双引擎采集器（本机 CDP 端口 ${options.port}，模式 ${options.engine}）；按 Ctrl+C 停止。`);
   try {
     while (!stopping) {
+      void antigravity.maintainLogin(t3Home);
       try {
         const targets = await listTargets(options.port);
         if (targets.length && !localEnvironmentId) localEnvironmentId = getLocalT3EnvironmentId();

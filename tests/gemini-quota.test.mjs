@@ -50,6 +50,137 @@ test("failed or expired sign-in never revives an old weekly quota", async () => 
   assert.equal(await reader.read(source), null);
 });
 
+test("an expired login renews in the background and fresh quota still requires the pinned account", async () => {
+  const renewal = Promise.withResolvers();
+  const t3Home = "/test/t3";
+  let expiry = now - 1000, renewals = 0, requests = 0, identity = "account-id";
+  const reader = new GeminiQuotaReader({
+    now: () => now,
+    readCredential: async () => ({ token: { access_token: `test-token-${identity}`, expiry: new Date(expiry).toISOString() } }),
+    renewCredential: dir => { assert.equal(dir, t3Home); renewals++; return renewal.promise; },
+    request: async url => {
+      requests++;
+      return { ok: true, json: async () => url.includes("userinfo") ? { id: identity } : summary };
+    },
+  });
+  assert.equal(await reader.read(source, { t3Home }), null);
+  assert.equal(await reader.read(source, { t3Home }), null);
+  assert.equal(renewals, 1);
+  assert.equal(requests, 0);
+
+  expiry = now + 3600000;
+  renewal.resolve();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.ok((await reader.read(source, { t3Home })).windows.length);
+  assert.equal(requests, 2);
+  identity = "another-account";
+  assert.equal(await reader.read({ ...source, providerInstanceId: "second" }, { t3Home }), null);
+  assert.equal(requests, 3);
+});
+
+test("quota stays available while renewing a token that is close to expiry", async () => {
+  const t3Home = "/test/t3";
+  const pending = Promise.withResolvers();
+  let clock = now, expiry = now + 301000, renewals = 0;
+  const reader = new GeminiQuotaReader({
+    now: () => clock,
+    readCredential: async () => ({ token: { access_token: "test-token", expiry: new Date(expiry).toISOString() } }),
+    renewCredential: () => { renewals++; return pending.promise; },
+    request: async url => ({ ok: true, json: async () => url.includes("userinfo") ? { id: "account-id" } : summary }),
+  });
+
+  const first = await reader.read(source, { t3Home });
+  assert.equal(renewals, 0);
+  clock += 2000;
+  assert.equal(await reader.read(source, { t3Home }), first);
+  assert.equal(renewals, 1);
+  clock += 12000;
+  assert.equal(await reader.read(source, { t3Home }), first);
+  assert.equal(renewals, 1);
+
+  expiry = now + 3600000;
+  pending.resolve();
+  await new Promise(resolve => setImmediate(resolve));
+  const renewed = await reader.read(source, { t3Home });
+  assert.ok(renewed);
+  assert.notEqual(renewed.checkedAt, first.checkedAt);
+  assert.equal(renewals, 1);
+});
+
+test("the last minute retries a renewal that failed or left the expiry unchanged", async () => {
+  const t3Home = "/test/t3";
+  let clock = now, expiry = now + 57000, renewals = 0;
+  const reader = new GeminiQuotaReader({
+    now: () => clock,
+    readCredential: async () => ({ token: { access_token: "test-token", expiry: new Date(expiry).toISOString() } }),
+    renewCredential: async () => {
+      renewals++;
+      if (renewals === 1) throw new Error("Offline");
+      if (renewals === 3) expiry = now + 3600000;
+    },
+    request: async url => ({ ok: true, json: async () => url.includes("userinfo") ? { id: "account-id" } : summary }),
+  });
+  const first = await reader.read(source, { t3Home });
+  assert.equal(renewals, 1);
+  clock += 9000;
+  assert.equal(await reader.read(source, { t3Home }), first);
+  assert.equal(renewals, 1);
+  clock += 1000;
+  assert.equal(await reader.read(source, { t3Home }), first);
+  assert.equal(renewals, 2);
+  await new Promise(resolve => setImmediate(resolve));
+  clock += 10000;
+  assert.equal(await reader.read(source, { t3Home }), first);
+  assert.equal(renewals, 3);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.notEqual((await reader.read(source, { t3Home })).checkedAt, first.checkedAt);
+});
+
+test("device login renews with no quota mapping or open Gemini session", async () => {
+  const t3Home = "/test/t3";
+  let clock = now, expiry = NaN, probes = 0, renewals = 0;
+  const reader = new GeminiQuotaReader({
+    now: () => clock,
+    readExpiry: async () => { probes++; return expiry; },
+    renewCredential: async home => {
+      assert.equal(home, t3Home);
+      renewals++;
+      expiry = clock + 3600000;
+    },
+    request: async () => assert.fail("Device renewal must not request account quota"),
+  });
+  await reader.maintainLogin(t3Home);
+  assert.equal(renewals, 0);
+  assert.equal(probes, 1);
+
+  expiry = now + 361000;
+  clock += 60000;
+  await reader.maintainLogin(t3Home);
+  assert.equal(renewals, 0);
+  clock += 2000;
+  await reader.maintainLogin(t3Home);
+  assert.equal(renewals, 1);
+  await reader.maintainLogin(t3Home);
+  assert.equal(renewals, 1);
+  assert.equal(probes, 3);
+});
+
+test("a long-expired login retries at most once a minute", async () => {
+  let clock = now, renewals = 0;
+  const reader = new GeminiQuotaReader({
+    now: () => clock,
+    readExpiry: async () => now - 120000,
+    renewCredential: async () => { renewals++; throw new Error("Authorization revoked"); },
+  });
+  await reader.maintainLogin("/test/t3");
+  clock += 10000;
+  await reader.maintainLogin("/test/t3");
+  assert.equal(renewals, 1);
+  clock += 50000;
+  await reader.maintainLogin("/test/t3");
+  assert.equal(renewals, 2);
+});
+
 test("quota transport follows the native model binding and separates Gemini from third-party weekly pools", () => {
   const base = { status: "ok", provider: "gemini", providerInstanceId: "google", model: "gemini-4-argon",
     environmentId: "remote", appThreadId: "app", threadId: "chat", nativeThreadId: "native" };
