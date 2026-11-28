@@ -18,7 +18,8 @@ export async function mountedRpcCall(environmentId, method, payload, timeoutMs =
   const runtime = nodes.find(n => n.atom?.factory && n.atom.layer &&
     typeof n.atom.atom === "function" && n._value?._tag === "Success")?.atom;
   if (!runtime) throw new Error("T3 effect runtime is unavailable");
-  const deadline = Date.now() + Math.min(4000, Math.max(100, timeoutMs));
+  const maximumTimeout = method === "infobar.refreshQuota" ? 8000 : 4000;
+  const deadline = Date.now() + Math.min(maximumTimeout, Math.max(100, timeoutMs));
   const owners = window.__T3_INFOBAR_RPC_OWNERS__ ||= new WeakMap();
   async function run(effect) {
     const atom = runtime.atom(effect), unmount = registry.mount(atom);
@@ -77,7 +78,8 @@ export async function mountedRpcCall(environmentId, method, payload, timeoutMs =
 }
 
 export async function callT3Rpc(client, environmentId, method, payload, timeoutMs = 2200) {
-  const result = await client.evaluate(`(async()=>{try{return {ok:true,value:await (${mountedRpcCall.toString()})(${JSON.stringify(environmentId)},${JSON.stringify(method)},${JSON.stringify(payload)},${timeoutMs})};}catch(error){return {ok:false,message:String(error.message).slice(0,2000)};}})()`);
+  const expression = `(async()=>{try{return {ok:true,value:await (${mountedRpcCall.toString()})(${JSON.stringify(environmentId)},${JSON.stringify(method)},${JSON.stringify(payload)},${timeoutMs})};}catch(error){return {ok:false,message:String(error.message).slice(0,2000)};}})()`;
+  const result = await client.evaluate(expression, Math.max(5000, timeoutMs + 1000));
   if (!result?.ok) throw new Error(result?.message || "T3 RPC call failed");
   return result.value;
 }

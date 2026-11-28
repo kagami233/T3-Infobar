@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { runInNewContext } from "node:vm";
 import { createT3AccountReader, selectT3Account } from "../src/t3-account.mjs";
+import { callT3Rpc } from "../src/t3-rpc.mjs";
 
 const now = Date.now();
 const context = { provider: "codex", providerInstanceId: "shared", model: "gpt-6.1-sol", defaultCodexHome: "C:\\User\\.codex" };
@@ -54,9 +56,11 @@ test("supported selected provider takes priority; Gemini clears Codex account da
   assert.equal(selectT3Account(p, { ...context, provider: "gemini" }, now), null);
 });
 
-test("the remote Codex connection refreshes both its quota and reset cards", async () => {
+test("a slow Codex refresh leaves both windows responsive and updates quota and cards on completion", { timeout: 2000 }, async () => {
   const remoteContext = { ...context, environmentId: "remote-machine", providerInstanceId: "codex" };
   const client = { evaluate() { assert.fail("Expected the selected environment's quota RPC"); } };
+  const secondWindow = { evaluate: client.evaluate };
+  const pendingRefresh = Promise.withResolvers();
   const calls = [];
   let clock = now;
   let redeemed = false;
@@ -64,16 +68,20 @@ test("the remote Codex connection refreshes both its quota and reset cards", asy
   provider.usageLimits.resetCredits.availableCount = 4;
   const read = createT3AccountReader({
     now: () => clock,
-    async rpc(clientArg, environmentId, method, payload) {
-      assert.equal(clientArg, client);
+    async rpc(clientArg, environmentId, method, payload, timeoutMs) {
+      assert.ok(clientArg === client || clientArg === secondWindow);
       assert.equal(environmentId, remoteContext.environmentId);
       assert.deepEqual(payload, { instanceId: remoteContext.providerInstanceId });
       calls.push(method);
-      if (method === "infobar.refreshQuota" && redeemed) {
-        const updated = providers()[1];
-        updated.usageLimits = { ...updated.usageLimits, checkedAt: new Date(clock).toISOString(),
-          windows: [{ ...updated.usageLimits.windows[0], usedPercent: 0 }] };
-        provider = { ...updated, environmentId };
+      if (method === "infobar.refreshQuota") {
+        assert.equal(timeoutMs, 8000);
+        if (redeemed) {
+          await pendingRefresh.promise;
+          const updated = providers()[1];
+          updated.usageLimits = { ...updated.usageLimits, checkedAt: new Date(clock).toISOString(),
+            windows: [{ ...updated.usageLimits.windows[0], usedPercent: 0 }] };
+          provider = { ...updated, environmentId };
+        }
       }
       return [provider];
     },
@@ -83,17 +91,63 @@ test("the remote Codex connection refreshes both its quota and reset cards", asy
   assert.equal(before.resetCardCount, 4);
   assert.equal(before.usageResets[0].usedPercent, 29);
 
+  await read(client, remoteContext);
   redeemed = true;
   clock = now + 1000;
-  assert.equal(await read(client, remoteContext), before);
+  assert.equal((await read(client, remoteContext)).resetCardCount, 4);
   clock = now + 15000;
   assert.equal((await read(client, remoteContext)).resetCardCount, 4);
   clock = now + 60000;
+  assert.equal((await read(client, remoteContext)).resetCardCount, 4);
+  assert.equal((await read(secondWindow, remoteContext)).resetCardCount, 4);
+  assert.equal(calls.filter(method => method === "infobar.refreshQuota").length, 2);
+
+  clock += 6000;
+  pendingRefresh.resolve();
+  await new Promise(resolve => setImmediate(resolve));
   const after = await read(client, remoteContext);
   assert.equal(after.resetCardCount, 3);
   assert.equal(after.usageResets[0].usedPercent, 0);
   assert.equal(after.observedAt, clock);
+  assert.equal((await read(secondWindow, remoteContext)).resetCardCount, 3);
   assert.equal(calls.filter(method => method === "infobar.refreshQuota").length, 2);
+});
+
+test("the T3 RPC and CDP budgets permit a quota refresh taking six seconds", async () => {
+  let elapsed = 0;
+  const environmentId = "remote-machine";
+  const config = { readyAt: 0, value: { environment: { environmentId } } };
+  const refresh = { readyAt: 6000, value: { providers: [providers()[1]] } };
+  const connection = {
+    initialConfig: config,
+    client: { "server.refreshProviders": () => refresh },
+  };
+  const client = {
+    evaluate(expression, timeout) {
+      assert.equal(timeout, 9000);
+      return runInNewContext(`(() => {
+        const registry = {
+          nodes: new Map([
+            ["runtime", { atom: { factory: true, layer: true, atom: effect => effect }, _value: { _tag: "Success" } }],
+            ["connection", { _value: { value: { value: connection } } }],
+          ]),
+          mount: () => () => {},
+          get: atom => Date.now() < atom.readyAt ? { _tag: "Waiting" } : { _tag: "Success", value: atom.value },
+        };
+        const host = { __reactFiber$test: { dependencies: { firstContext: { memoizedValue: registry } } } };
+        const document = { querySelector: () => host };
+        const window = {};
+        return ${expression};
+      })()`, {
+        connection,
+        Date: { now: () => elapsed },
+        setTimeout(callback, delay) { elapsed += delay; callback(); },
+      });
+    },
+  };
+  const result = await callT3Rpc(client, environmentId, "infobar.refreshQuota", { instanceId: "codex" }, 8000);
+  assert.equal(elapsed, 6000);
+  assert.equal(result[0].usageLimits.resetCredits.availableCount, 3);
 });
 
 function geminiProvider() {
