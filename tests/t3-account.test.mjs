@@ -96,3 +96,12 @@ test("expired Gemini windows keep the original reset time for waiting-for-update
   p.usageLimits.checkedAt = new Date(now - 8 * 86400000).toISOString();
   assert.equal(selectT3Account([p], geminiContext, now), null);
 });
+
+test("identically named providers on other machines never supply remote account quota", () => {
+  const p = geminiProvider();
+  p.environmentId = "local-machine";
+  const ctx = { ...geminiContext, environmentId: "remote-machine" };
+  assert.equal(selectT3Account([p], ctx, now), null);
+  p.environmentId = ctx.environmentId;
+  assert.equal(selectT3Account([p], ctx, now).usageResets.length, 2);
+});

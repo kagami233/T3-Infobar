@@ -5,7 +5,7 @@ import path from "node:path";
 import { parseRollout } from "./metrics.mjs";
 
 export const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-export const IMPORT_CODEX = /^(?:import(?::|%3A)codex_[0-9a-f-]+(?::|%3A))([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
+export const IMPORT_CODEX = /^(?:import(?::|%3A)codex(?:_[0-9a-f-]+)?(?::|%3A))([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
 
 const MAX_BYTES = 64 * 1024 * 1024;
 const MAX_HEADER_BYTES = 1024 * 1024;
@@ -62,13 +62,23 @@ export function validateThreadId(value) {
   throw new Error("需要明确的聊天 UUID 或 T3 import:codex 线程 ID；不会自动选择未验证聊天。");
 }
 
-async function telemetryText(file, size) {
+async function telemetryText(file, size, threadId) {
   const lines = [];
   let pending = "", dropping = false, retained = 0;
+  let firstRecord = true, childStart = null;
   function accept(line) {
     if (!line.trim()) return;
     let e;
     try { e = JSON.parse(line); } catch { lines.push("{invalid"); return; }
+    if (firstRecord) {
+      firstRecord = false;
+      const start = e.payload?.subagent_history_start_ordinal;
+      if (e.type === "session_meta" && e.payload?.id === threadId &&
+          Number.isSafeInteger(start) && start >= 0) childStart = start;
+    } else if (childStart !== null && (!Number.isSafeInteger(e.ordinal) || e.ordinal < childStart)) {
+      // A fork can embed its parent's header, turns and usage before this boundary.
+      return;
+    }
     const type = e.type === "event_msg" ? e.payload?.type : e.type;
     if (!TELEMETRY.has(type) || !e.payload) return;
     const payload = Object.fromEntries(FIELDS.filter(k => Object.hasOwn(e.payload, k)).map(k => [k, e.payload[k]]));
@@ -169,7 +179,7 @@ export class RolloutReader {
     const key = `${file}:${stat.mtimeMs}:${stat.size}`;
     let cache = this.cache.get(threadId);
     if (!cache || cache.key !== key) {
-      const text = await telemetryText(file, stat.size);
+      const text = await telemetryText(file, stat.size, threadId);
       cache = { key, text };
       this.cache.delete(threadId);
       this.cache.set(threadId, cache);

@@ -6,7 +6,7 @@
   const EXPIRY_MS = 30000;
   const ACCOUNT_EXPIRY_MS = 90000;
   const UUID = "([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})";
-  const IMPORT_CODEX = new RegExp(`(?:import(?::|%3A)codex_[0-9a-f-]+(?::|%3A))${UUID}`, "i");
+  const IMPORT_CODEX = new RegExp(`^import:codex(?:_[0-9a-f-]+)?:${UUID}$`, "i");
   const ROUTE = new RegExp(`^/(?:local|threads?|projects/[^/]+/threads?|hotkey-window/thread)/([^/?#]+)/?$`, "i");
   window[KEY]?.remove?.();
   if (window[LEGACY_KEY] && window[LEGACY_KEY] !== window[KEY]) window[LEGACY_KEY]?.remove?.();
@@ -82,6 +82,7 @@
     const decoded = (() => { try { return decodeURIComponent(raw); } catch { return raw; } })();
     const imported = IMPORT_CODEX.exec(decoded)?.[1];
     if (imported) return imported.toLowerCase();
+    if (/^thread:subagent:[a-f0-9]+$/i.test(decoded)) return decoded;
     const direct = new RegExp(`^${UUID}$`, "i").exec(decoded)?.[1];
     if (direct) return direct.toLowerCase();
     const prefixed = new RegExp(`^local:${UUID}$`, "i").exec(decoded)?.[1];
@@ -144,6 +145,8 @@
       const qThread = normalizeThreadId(url.searchParams.get("threadId") || url.searchParams.get("thread"));
       if (qThread) return qThread;
       const path = url.hash.startsWith("#/") ? url.hash.slice(1).split("?")[0] : url.pathname;
+      const environmentRoute = new RegExp(`^/${UUID}/([^/?#]+)/?$`, "i").exec(path);
+      if (environmentRoute) return normalizeThreadId(environmentRoute[2]);
       const routeMatch = ROUTE.exec(path)?.[1];
       const direct = normalizeThreadId(routeMatch);
       if (direct) return direct;
@@ -176,6 +179,21 @@
       }
       return ids.size === 1 ? Array.from(ids)[0] : null;
     } catch { return null; }
+  }
+
+  function getThreadContext() {
+    try {
+      const url = new URL(window.location.href);
+      const path = url.hash.startsWith("#/") ? url.hash.slice(1).split("?")[0] : url.pathname;
+      const route = new RegExp(`^/${UUID}/([^/?#]+)/?$`, "i").exec(path);
+      if (route) return { environmentId: route[1].toLowerCase(),
+        appThreadId: decodeURIComponent(route[2]), threadId: normalizeThreadId(route[2]) };
+    } catch {}
+    const id = getThreadId();
+    return { environmentId: null, appThreadId: id, threadId: id };
+  }
+  function sessionKey(value = getThreadContext()) {
+    return JSON.stringify([value.environmentId ?? null, value.threadId ?? null]);
   }
 
   function isNewConversation(composer) {
@@ -237,6 +255,7 @@
       numeric(w.resetsAt) && w.resetsAt > 0 && w.resetsAt * 1000 <= 8640000000000000);
   }
   function freshAccount() {
+    if ((accountSnapshot?.environmentId ?? null) !== (snapshot?.environmentId ?? null)) return false;
     if (accountSnapshot?.threadId && accountSnapshot.threadId !== getThreadId()) return false;
     if (accountSnapshot?.provider && accountSnapshot.provider !== snapshot?.provider) return false;
     if (snapshot?.provider === "gemini" && accountSnapshot?.provider !== "gemini") return false;
@@ -303,7 +322,9 @@
     for (const w of windows) {
       const bucket = w.limitName || w.limitId;
       const current = w.resetsAt * 1000 > Date.now();
-      const remaining = current && numeric(w.usedPercent)
+      const quotaFresh = snapshot?.provider !== "gemini" || Date.now() - accountSnapshot?.observedAt <= ACCOUNT_EXPIRY_MS ||
+        (numeric(w.restrictionUntil) && w.restrictionUntil * 1000 > Date.now());
+      const remaining = current && quotaFresh && numeric(w.usedPercent)
         ? Math.max(0, Math.min(100, 100 - w.usedPercent)) : null;
       const selected = deadline(w);
       const sourceBadge = accountSnapshot?.sourceBadge ? `${accountSnapshot.sourceBadge} ` : "";
@@ -433,7 +454,8 @@
   }
 
   function render(stale, cached = false) {
-    const view = JSON.stringify([snapshot, stale, cached, freshAccount() ? accountSnapshot : null, resetDisplay(), resetCardCount()]);
+    const expiredGeminiQuota = snapshot?.provider === "gemini" && Date.now() - accountSnapshot?.observedAt > ACCOUNT_EXPIRY_MS;
+    const view = JSON.stringify([snapshot, stale, cached, freshAccount() ? accountSnapshot : null, expiredGeminiQuota, resetDisplay(), resetCardCount()]);
     if (view === lastView) return;
     lastView = view;
     const isGemini = snapshot?.provider === "gemini" || Boolean(snapshot?.modelBadge);
@@ -475,13 +497,14 @@
   function refresh() {
     if (removed) return;
     const threadId = getThreadId();
+    const key = sessionKey();
     const composer = findComposer();
     const draft = !threadId && isNewConversation(composer);
-    if (threadId !== lastRoute) {
-      const cached = snapshots.get(threadId);
+    if (key !== lastRoute) {
+      const cached = snapshots.get(key);
       snapshot = cached?.snapshot ?? (threadId ? { threadId, status: "unavailable" } : null);
       receivedAt = cached?.receivedAt ?? Date.now();
-      lastRoute = threadId;
+      lastRoute = key;
     }
     if (draft && !snapshot) {
       snapshot = { threadId: null, status: "unavailable", draft: true };
@@ -539,6 +562,7 @@
   const api = {
     version: "0.3.3",
     getThreadId,
+    getThreadContext,
     normalizeThreadId,
     primeSnapshots(entries) {
       if (removed || !Array.isArray(entries)) return false;
@@ -546,10 +570,11 @@
       for (const entry of entries.slice(-64)) {
         const id = normalizeThreadId(entry?.snapshot?.threadId);
         if (!id || !numeric(entry.receivedAt) || entry.receivedAt > Date.now()) continue;
-        if ((snapshots.get(id)?.receivedAt ?? -1) > entry.receivedAt) continue;
-        snapshots.delete(id);
-        snapshots.set(id, { snapshot: { ...entry.snapshot, threadId: id }, receivedAt: entry.receivedAt });
-        if (id === getThreadId()) { snapshot = { ...entry.snapshot, threadId: id }; receivedAt = entry.receivedAt; }
+        const key = sessionKey({ ...entry.snapshot, threadId: id });
+        if ((snapshots.get(key)?.receivedAt ?? -1) > entry.receivedAt) continue;
+        snapshots.delete(key);
+        snapshots.set(key, { snapshot: { ...entry.snapshot, threadId: id }, receivedAt: entry.receivedAt });
+        if (key === sessionKey()) { snapshot = { ...entry.snapshot, threadId: id }; receivedAt = entry.receivedAt; }
       }
       while (snapshots.size > 64) snapshots.delete(snapshots.keys().next().value);
       refresh();
@@ -566,6 +591,7 @@
       if (!value || typeof value !== "object") return false;
       const incomingId = normalizeThreadId(value.threadId);
       const currentId = getThreadId();
+      if ((value.environmentId ?? null) !== (getThreadContext().environmentId ?? null)) return false;
       if (currentId && incomingId && incomingId !== currentId) {
         refresh();
         return false;
@@ -575,8 +601,9 @@
       receivedAt = Date.now();
       collectorAt = receivedAt;
       if (effectiveId) {
-        snapshots.delete(effectiveId);
-        snapshots.set(effectiveId, { snapshot, receivedAt });
+        const key = sessionKey(snapshot);
+        snapshots.delete(key);
+        snapshots.set(key, { snapshot, receivedAt });
         if (snapshots.size > 64) snapshots.delete(snapshots.keys().next().value);
       }
       refresh();
@@ -593,6 +620,7 @@
       return {
         mounted,
         threadId: getThreadId(),
+        environmentId: getThreadContext().environmentId,
         provider: snapshot?.provider ?? (snapshot?.modelBadge ? "gemini" : "codex"),
         position,
         stale: Boolean(snapshot && Date.now() - receivedAt > EXPIRY_MS),

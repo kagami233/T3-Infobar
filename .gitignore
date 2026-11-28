@@ -7,6 +7,8 @@ output/
 status.json
 snapshot-cache.json
 settings.json
+shared-quota.json
+remote-metrics.json
 watcher-lock.json
 *.app/
 .env

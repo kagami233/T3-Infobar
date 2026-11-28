@@ -1,19 +1,27 @@
 import fs from 'node:fs/promises';
-import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import {stateRoot} from './cdp.mjs';
+import { sessionKey } from './t3-runtime.mjs';
 
 const MAX_BYTES = 1024 * 1024;
 const MAX_AGE = 7 * 86400000;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const SUBAGENT_ID = /^thread:subagent:[a-f0-9]+$/i;
 const NUMBERS = ['averageOutputTps','lastCacheRatio','compactionCount','contextUsedTokens','contextWindowTokens','contextRemainingTokens'];
 function clean(entry, now) {
   const value = entry?.snapshot, at = entry?.receivedAt;
-  if (!value || typeof value.threadId !== 'string' || !UUID.test(value.threadId) || value.status !== 'ok' ||
+  if (!value || typeof value.threadId !== 'string' ||
+      !(UUID.test(value.threadId) || SUBAGENT_ID.test(value.threadId)) || value.status !== 'ok' ||
       !Number.isFinite(at) || at <= 0 || at > now || now - at > MAX_AGE) return null;
-  const snapshot = { threadId:value.threadId.toLowerCase(), status:'ok', source:'local-rollout',
+  const snapshot = { threadId:UUID.test(value.threadId) ? value.threadId.toLowerCase() : value.threadId, status:'ok', source:'local-rollout',
     historyComplete:value.historyComplete === true, active:false };
+  if (value.environmentId !== undefined && value.environmentId !== null && !UUID.test(value.environmentId)) return null;
+  snapshot.environmentId = value.environmentId ?? null;
+  if (['codex', 'gemini'].includes(value.provider)) snapshot.provider = value.provider;
+  if (typeof value.providerInstanceId === 'string') snapshot.providerInstanceId = value.providerInstanceId.slice(0,100);
+  if (typeof value.modelBadge === 'string') snapshot.modelBadge = value.modelBadge.slice(0,100);
+  if (value.source === 't3-projection') snapshot.source = value.source;
   for (const key of NUMBERS) snapshot[key] = Number.isFinite(value[key]) && value[key] >= 0 ? value[key] : null;
   if(typeof value.model==='string')snapshot.model=value.model.slice(0,100);
   snapshot.compactionSamples=Array.isArray(value.compactionSamples)?value.compactionSamples.slice(-8).filter(x=>typeof x.model==='string'&&Number.isFinite(x.tokens)&&x.tokens>0&&Number.isFinite(x.contextWindow)&&x.contextWindow>0).map(x=>({model:x.model.slice(0,100),tokens:x.tokens,contextWindow:x.contextWindow,trigger:['auto','manual'].includes(x.trigger)?x.trigger:'unknown'})):[];
@@ -31,7 +39,7 @@ export class SnapshotCache {
       if ((await fs.stat(this.file)).size > MAX_BYTES) return new Map();
       const data = JSON.parse(await fs.readFile(this.file,'utf8'));
       if (data.version !== 1 || !Array.isArray(data.entries)) return new Map();
-      return new Map(data.entries.slice(-64).map(e => clean(e,this.now())).filter(Boolean).map(e=>[e.snapshot.threadId,e]));
+      return new Map(data.entries.slice(-64).map(e => clean(e,this.now())).filter(Boolean).map(e=>[sessionKey(e.snapshot),e]));
     } catch { return new Map(); }
   }
   async save(entries, force = false) {

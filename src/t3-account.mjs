@@ -1,11 +1,14 @@
+import { callT3Rpc } from "./t3-rpc.mjs";
+
 // An email can belong to multiple registrations and quota pools. Only the
 // selected provider's snapshot can describe the current connection's allowance.
 export function selectT3Account(providers, context, now = Date.now()) {
-  const exact = providers.find(p => p.instanceId === context.providerInstanceId);
+  const exact = providers.find(p => p.instanceId === context.providerInstanceId &&
+    (!context.environmentId || p.environmentId === context.environmentId));
   const isGemini = context.provider === "gemini" && ["antigravity", "gemini"].includes(exact?.driver);
   if ((!isGemini && (context.provider !== "codex" || exact?.driver !== "codex")) ||
       exact?.auth?.status !== "authenticated") return null;
-  const scope = { provider: context.provider, threadId: context.threadId ?? null,
+  const scope = { provider: context.provider, environmentId: context.environmentId ?? null, threadId: context.threadId ?? null,
     model: context.model ?? null, sourceInstanceId: exact.instanceId };
   const usable = p => p?.usageLimits && !p.usageLimits.unavailable &&
     (p.usageLimits.windows?.length || p.usageLimits.resetCredits);
@@ -34,12 +37,15 @@ export function selectT3Account(providers, context, now = Date.now()) {
   const baseModel = value => typeof value === "string"
     ? value.toLowerCase().replace(/-(?:xhigh|high|medium|low|ultra|ultrathink|max)$/, "") : "";
   const model = baseModel(context.model);
+  const family = /^gemini-(?:\d+(?:\.\d+)?-)?(argon|carbon|neon|hydrogen)$/.exec(model)?.[1];
+  const scopedGemini = family && limits.windows?.some(w => new RegExp(`^gemini-${family}-(?:5h|weekly)$`).test(w.id));
   const matchesModel = w => {
     if (Array.isArray(w.modelIds) && w.modelIds.length) {
       return w.modelIds.some(id => baseModel(id) === model);
     }
     if (!isGemini) return true;
-    if (model.startsWith("gemini-")) return /^gemini-(?:5h|weekly)$/.test(w.id);
+    if (model.startsWith("gemini-")) return scopedGemini
+      ? new RegExp(`^gemini-${family}-(?:5h|weekly)$`).test(w.id) : /^gemini-(?:5h|weekly)$/.test(w.id);
     if (/^(?:claude-|gpt-)/.test(model)) return /^3p-(?:5h|weekly)$/.test(w.id);
     return false;
   };
@@ -51,8 +57,9 @@ export function selectT3Account(providers, context, now = Date.now()) {
     limitName: isGemini ? (model.startsWith("gemini-") ? "Gemini" : "Claude/GPT") : "账户额度",
     window: w.kind === "weekly" ? "secondary" : "primary",
     windowMinutes: w.windowDurationMins ?? null,
-    usedPercent: w.usedPercent, resetsAt: timestamp(w.resetsAt, false), observedAt: limits.checkedAt,
-  }));
+    usedPercent: isGemini && now - observedAt > 90000 ? null : w.usedPercent,
+    resetsAt: timestamp(w.resetsAt, false), observedAt: limits.checkedAt,
+  })).sort((a, b) => Number(a.window === "secondary") - Number(b.window === "secondary"));
   const credits = isGemini ? null : limits.resetCredits;
   const nextExpiry = timestamp(credits?.nextExpiresAt);
   const expiredSummary = Boolean(credits?.nextExpiresAt && !nextExpiry);
@@ -72,7 +79,21 @@ export function selectT3Account(providers, context, now = Date.now()) {
 
 // T3 already subscribes to these snapshots. Read its mounted state without
 // opening another authenticated connection or exposing credentials.
-function mountedProviderSnapshots() {
+export function mountedProviderSnapshots(context = {}) {
+  if (context.environmentId) {
+    for (const host of document.querySelectorAll('[data-chat-composer-form], [data-slot="composer-host"]')) {
+      const key = Object.keys(host).find(k => k.startsWith("__reactFiber$"));
+      let fiber = host[key];
+      for (let i = 0; fiber && i < 150; i++, fiber = fiber.return) {
+        const p = fiber.memoizedProps;
+        if (p?.environmentId === context.environmentId && Array.isArray(p.providerStatuses)) {
+          if (p.environmentUnavailable === true) return [];
+          return p.providerStatuses.map(provider => ({ ...provider, environmentId: p.environmentId }));
+        }
+      }
+    }
+    return [];
+  }
   const host = document.querySelector('[data-slot="composer-host"]') || document.querySelector('[data-chat-composer-form]');
   const key = Object.keys(host || {}).find(k => k.startsWith("__reactFiber$"));
   let root = host?.[key];
@@ -108,14 +129,30 @@ function mountedProviderSnapshots() {
   return [...found.values()];
 }
 
-export function createT3AccountReader() {
+export function createT3AccountReader({ rpc = callT3Rpc, now = Date.now } = {}) {
   const cache = new WeakMap();
+  const refreshes = new Map();
   return async (client, context) => {
     const key = JSON.stringify(context);
-    const previous = cache.get(client);
-    if (previous?.key === key && Date.now() - previous.at < 15000) return previous.value;
-    const value = await client.evaluate(`(${selectT3Account.toString()})((${mountedProviderSnapshots.toString()})(), ${JSON.stringify(context)})`);
-    cache.set(client, { key, at: Date.now(), value });
+    let entries = cache.get(client);
+    if (!entries) { entries = new Map(); cache.set(client, entries); }
+    const previous = entries.get(key);
+    if (previous && now() - previous.at < 15000) return previous.value;
+    let value;
+    if (context.provider === "gemini" && context.environmentId && context.providerInstanceId) {
+      const refreshKey = JSON.stringify([context.environmentId, context.providerInstanceId]);
+      if (!refreshes.has(refreshKey) || now() - refreshes.get(refreshKey) >= 60000) {
+        refreshes.set(refreshKey, now());
+        if (refreshes.size > 64) refreshes.delete(refreshes.keys().next().value);
+        try { await rpc(client, context.environmentId, "infobar.refreshQuota", { instanceId: context.providerInstanceId }, 3500); } catch {}
+      }
+      try {
+        value = selectT3Account(await rpc(client, context.environmentId, "infobar.readQuota", { instanceId: context.providerInstanceId }), context, now());
+      } catch {}
+    }
+    if (value === undefined) value = await client.evaluate(`(${selectT3Account.toString()})((${mountedProviderSnapshots.toString()})(${JSON.stringify(context)}), ${JSON.stringify(context)}, ${now()})`);
+    entries.set(key, { at: now(), value });
+    if (entries.size > 64) entries.delete(entries.keys().next().value);
     return value;
   };
 }

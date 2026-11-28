@@ -47,6 +47,8 @@ export function parseGeminiTranscript(text, {
   conversationId = null,
   contextWindowTokens = GEMINI_CONTEXT_WINDOW,
   compactLimitTokens = GEMINI_COMPACT_LIMIT,
+  recordedCompactionsOnly = false,
+  strictUsage = false,
 } = {}) {
   const lines = String(text).split("\n");
   let model = null;
@@ -62,6 +64,7 @@ export function parseGeminiTranscript(text, {
   let turnOutputTokens = 0;
   let lastCompletedTurnTps = null;
   let active = false;
+  const turnOutputs = new Map();
 
   for (const rawLine of lines) {
     const line = rawLine.trim();
@@ -84,14 +87,15 @@ export function parseGeminiTranscript(text, {
       turnStartMs = Number.isFinite(ts) ? ts : null;
       turnEndMs = null;
       turnOutputTokens = 0;
+      turnOutputs.clear();
       active = true;
-      if (typeof step.content === "string" && /(?:^|\s)\/compact(?:\s|$)/i.test(step.content)) {
+      if (!recordedCompactionsOnly && typeof step.content === "string" && /(?:^|\s)\/compact(?:\s|$)/i.test(step.content)) {
         compactionCount += 1;
       }
       continue;
     }
 
-    if (["COMPACTION", "CONTEXT_COMPACTION", "SUMMARY"].includes(step.type)) {
+    if (["COMPACTION", "CONTEXT_COMPACTION", ...(recordedCompactionsOnly ? [] : ["SUMMARY"])].includes(step.type)) {
       compactionCount += 1;
       prevTotalInput = null;
       continue;
@@ -101,13 +105,13 @@ export function parseGeminiTranscript(text, {
       if (typeof step.model === "string" && step.model) {
         model = step.model;
       }
-      const inTok = numeric(step.input_tokens) ? step.input_tokens : 0;
-      const cacheTok = numeric(step.cache_read_tokens) ? step.cache_read_tokens : 0;
-      const outTok = numeric(step.output_tokens) ? step.output_tokens : 0;
-      const totalIn = inTok + cacheTok;
+      const inTok = numeric(step.input_tokens) ? step.input_tokens : strictUsage ? null : 0;
+      const cacheTok = numeric(step.cache_read_tokens) ? step.cache_read_tokens : strictUsage ? null : 0;
+      const outTok = numeric(step.output_tokens) ? step.output_tokens : strictUsage ? null : 0;
+      const totalIn = inTok !== null && cacheTok !== null ? inTok + cacheTok : null;
 
       // Detect implicit/auto context compaction when total prompt tokens drop by >35% (>30k tokens)
-      if (prevTotalInput !== null && prevTotalInput >= 50_000 && totalIn > 0 && totalIn < prevTotalInput * 0.65) {
+      if (!recordedCompactionsOnly && prevTotalInput !== null && prevTotalInput >= 50_000 && totalIn > 0 && totalIn < prevTotalInput * 0.65) {
         compactionCount += 1;
       }
       if (totalIn > 0) prevTotalInput = totalIn;
@@ -116,7 +120,13 @@ export function parseGeminiTranscript(text, {
       lastCacheRead = cacheTok;
       lastOutput = outTok;
 
-      turnOutputTokens += outTok;
+      if (outTok !== null) {
+        if (strictUsage && Number.isSafeInteger(step.step_index)) {
+          const previous = turnOutputs.get(step.step_index) ?? 0;
+          turnOutputTokens += Math.max(0, outTok - previous);
+          turnOutputs.set(step.step_index, Math.max(previous, outTok));
+        } else turnOutputTokens += outTok;
+      }
       if (Number.isFinite(ts)) {
         turnEndMs = ts;
       }
@@ -174,7 +184,7 @@ export function parseGeminiTranscript(text, {
         }
       : null,
     compactionCount,
-    historyComplete: true,
+    historyComplete: !recordedCompactionsOnly,
     averageOutputTps,
     // A conversation transcript cannot measure an account-wide allowance.
     // Read quota windows from the selected T3 provider's usageLimits instead.
