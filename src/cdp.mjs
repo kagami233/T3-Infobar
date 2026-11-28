@@ -121,7 +121,7 @@ export class Cdp {
     });
     return this;
   }
-  async evaluate(expression) {
+  async evaluate(expression, timeoutMs = 5000) {
     if (this.closed) throw new Error("调试连接已关闭");
     const id = ++this.id;
     const result = await new Promise((resolve, reject) => {
@@ -130,7 +130,7 @@ export class Cdp {
         const error = new Error("调试命令超时");
         error.transient = true;
         reject(error);
-      }, 5000);
+      }, timeoutMs);
       this.pending.set(id, { resolve, reject, timer });
       this.socket.send(JSON.stringify({
         id,

@@ -136,23 +136,38 @@ export function createT3AccountReader({ rpc = callT3Rpc, now = Date.now } = {}) 
     const key = JSON.stringify(context);
     let entries = cache.get(client);
     if (!entries) { entries = new Map(); cache.set(client, entries); }
+    const scoped = (context.provider === "codex" || context.provider === "gemini") &&
+      context.environmentId && context.providerInstanceId;
+    const refreshKey = scoped ? JSON.stringify([context.environmentId, context.providerInstanceId]) : null;
+    let refresh = refreshes.get(refreshKey);
     const previous = entries.get(key);
-    if (previous && now() - previous.at < 15000) return previous.value;
+    const readAt = now();
+    if (previous && readAt - previous.at < 15000 && previous.revision === refresh?.revision) return previous.value;
     let value;
-    if ((context.provider === "codex" || context.provider === "gemini") &&
-        context.environmentId && context.providerInstanceId) {
-      const refreshKey = JSON.stringify([context.environmentId, context.providerInstanceId]);
-      if (!refreshes.has(refreshKey) || now() - refreshes.get(refreshKey) >= 60000) {
-        refreshes.set(refreshKey, now());
-        if (refreshes.size > 64) refreshes.delete(refreshes.keys().next().value);
-        try { await rpc(client, context.environmentId, "infobar.refreshQuota", { instanceId: context.providerInstanceId }, 3500); } catch {}
+    if (refreshKey && (!refresh || readAt - refresh.at >= 60000)) {
+      const next = { at: readAt, revision: refresh?.revision };
+      refreshes.set(refreshKey, next);
+      refresh = next;
+      if (refreshes.size > 64) refreshes.delete(refreshes.keys().next().value);
+      const codex = context.provider === "codex";
+      const request = rpc(client, context.environmentId, "infobar.refreshQuota",
+        { instanceId: context.providerInstanceId }, codex ? 8000 : 3500);
+      if (codex) {
+        // The desktop polls windows serially. Invalidate their quota caches once
+        // the refresh completes, without holding up the current collection pass.
+        void request.then(() => { next.revision = Symbol(); }, () => {});
+      } else {
+        try { await request; } catch {}
       }
+    }
+    const revision = refresh?.revision;
+    if (refreshKey) {
       try {
         value = selectT3Account(await rpc(client, context.environmentId, "infobar.readQuota", { instanceId: context.providerInstanceId }), context, now());
       } catch {}
     }
     if (value === undefined) value = await client.evaluate(`(${selectT3Account.toString()})((${mountedProviderSnapshots.toString()})(${JSON.stringify(context)}), ${JSON.stringify(context)}, ${now()})`);
-    entries.set(key, { at: now(), value });
+    entries.set(key, { at: now(), revision, value });
     if (entries.size > 64) entries.delete(entries.keys().next().value);
     return value;
   };
