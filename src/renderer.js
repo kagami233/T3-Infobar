@@ -8,6 +8,7 @@
   const UUID = "([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})";
   const IMPORT_CODEX = new RegExp(`^import:codex(?:_[0-9a-f-]+)?:${UUID}$`, "i");
   const ROUTE = new RegExp(`^/(?:local|threads?|projects/[^/]+/threads?|hotkey-window/thread)/([^/?#]+)/?$`, "i");
+  const ENVIRONMENT_ROUTE = new RegExp(`^/${UUID}(?:/([^/?#]+))?/?$`, "i");
   window[KEY]?.remove?.();
   if (window[LEGACY_KEY] && window[LEGACY_KEY] !== window[KEY]) window[LEGACY_KEY]?.remove?.();
 
@@ -94,7 +95,7 @@
     return `重置卡:${count === null ? "—" : `${count}张`}${accountSnapshot?.sourceDescription ? `\n${accountSnapshot.sourceDescription}` : ""}`;
   }
 
-  function composerThread(composer) {
+  function committedComposer(composer) {
     if (!composer) return null;
     const key = Object.getOwnPropertyNames(composer).find(k => k.startsWith("__reactFiber$"));
     let fiber = key && composer[key];
@@ -112,26 +113,7 @@
     let budget = 4096;
     while (pending.length && budget-- > 0) {
       const item = pending.pop();
-      if (item.fiber.stateNode === composer) {
-        let emptyConversation = false;
-        for (let cursor = item; cursor; cursor = cursor.parent) {
-          const props = cursor.fiber.memoizedProps;
-          if (!props) continue;
-          if (typeof props.threadId === "string") {
-            const id = normalizeThreadId(props.threadId);
-            if (id) return { id };
-          }
-          if (Object.prototype.hasOwnProperty.call(props, "conversationId") && props.conversationId === null) {
-            if (typeof props.hostId === "string" && props.hostId !== "local") return { id: null, draft: false };
-            emptyConversation = true;
-          }
-          if (typeof props.conversationId === "string" && (typeof props.hostId !== "string" || props.hostId === "local")) {
-            const id = normalizeThreadId(props.conversationId);
-            return { id };
-          }
-        }
-        return emptyConversation ? { id: null, draft: true } : null;
-      }
+      if (item.fiber.stateNode === composer) return item;
       for (let child = item.fiber.child; child && budget-- > 0; child = child.sibling) {
         if (ancestors.has(child)) pending.push({ fiber: child, parent: item });
       }
@@ -139,14 +121,53 @@
     return null;
   }
 
+  function composerThread(composer) {
+    let emptyConversation = false;
+    for (let cursor = committedComposer(composer); cursor; cursor = cursor.parent) {
+      const props = cursor.fiber.memoizedProps;
+      if (!props) continue;
+      const threadId = normalizeThreadId(props.threadId);
+      if (threadId) return { id: threadId };
+      if (typeof props.hostId === "string" && props.hostId !== "local") {
+        if (props.conversationId === null) return { id: null, draft: false };
+        continue;
+      }
+      if (typeof props.conversationId === "string") return { id: normalizeThreadId(props.conversationId) };
+      if (props.conversationId === null) emptyConversation = true;
+    }
+    return emptyConversation ? { id: null, draft: true } : null;
+  }
+
+  function getComposerSelection() {
+    try {
+      const activeEnvironmentId = getThreadContext().environmentId;
+      for (let cursor = committedComposer(findComposer()); cursor; cursor = cursor.parent) {
+        const props = cursor.fiber.memoizedProps;
+        const handle = props?.composerRef?.current;
+        if (typeof handle?.getSendContext !== "function") continue;
+        const environmentId = normalizeThreadId(props.environmentId);
+        if (!environmentId || (activeEnvironmentId && environmentId !== activeEnvironmentId)) return null;
+        const context = handle.getSendContext();
+        const driver = context?.selectedProvider;
+        const { instanceId, model } = context?.selectedModelSelection ?? {};
+        if (!["codex", "antigravity", "gemini"].includes(driver) || typeof instanceId !== "string" ||
+            !/^[a-zA-Z0-9_-]+$/.test(instanceId) || typeof model !== "string" || !model) return null;
+        const effort = context.selectedModelSelection.options?.find(option => option.id === "thought_level")?.value;
+        return { environmentId, provider: driver === "codex" ? "codex" : "gemini",
+          providerInstanceId: instanceId, model, effort: typeof effort === "string" ? effort : null };
+      }
+    } catch {}
+    return null;
+  }
+
   function getThreadId() {
     try {
       const url = new URL(window.location.href);
+      const path = url.hash.startsWith("#/") ? url.hash.slice(1).split("?")[0] : url.pathname;
+      const scoped = ENVIRONMENT_ROUTE.exec(path);
+      if (scoped) return normalizeThreadId(scoped[2]);
       const qThread = normalizeThreadId(url.searchParams.get("threadId") || url.searchParams.get("thread"));
       if (qThread) return qThread;
-      const path = url.hash.startsWith("#/") ? url.hash.slice(1).split("?")[0] : url.pathname;
-      const environmentRoute = new RegExp(`^/${UUID}/([^/?#]+)/?$`, "i").exec(path);
-      if (environmentRoute) return normalizeThreadId(environmentRoute[2]);
       const routeMatch = ROUTE.exec(path)?.[1];
       const direct = normalizeThreadId(routeMatch);
       if (direct) return direct;
@@ -185,9 +206,9 @@
     try {
       const url = new URL(window.location.href);
       const path = url.hash.startsWith("#/") ? url.hash.slice(1).split("?")[0] : url.pathname;
-      const route = new RegExp(`^/${UUID}/([^/?#]+)/?$`, "i").exec(path);
+      const route = ENVIRONMENT_ROUTE.exec(path);
       if (route) return { environmentId: route[1].toLowerCase(),
-        appThreadId: decodeURIComponent(route[2]), threadId: normalizeThreadId(route[2]) };
+        appThreadId: route[2] ? decodeURIComponent(route[2]) : null, threadId: normalizeThreadId(route[2]) };
     } catch {}
     const id = getThreadId();
     return { environmentId: null, appThreadId: id, threadId: id };
@@ -250,8 +271,8 @@
   }
   function resetWindows() {
     const source = freshAccount() && Array.isArray(accountSnapshot.usageResets)
-      ? accountSnapshot.usageResets : snapshot?.provider === "gemini" ? [] : snapshot?.usageResets;
-    return (Array.isArray(source) ? source : []).filter(w =>
+      ? accountSnapshot.usageResets : [];
+    return source.filter(w =>
       numeric(w.resetsAt) && w.resetsAt > 0 && w.resetsAt * 1000 <= 8640000000000000);
   }
   function freshAccount() {
@@ -259,8 +280,7 @@
     if (accountSnapshot?.threadId && accountSnapshot.threadId !== getThreadId()) return false;
     if (accountSnapshot?.provider && accountSnapshot.provider !== snapshot?.provider) return false;
     if (snapshot?.provider === "gemini" && accountSnapshot?.provider !== "gemini") return false;
-    if (accountSnapshot?.sourceInstanceId && snapshot?.providerInstanceId &&
-        accountSnapshot.sourceInstanceId !== snapshot.providerInstanceId) return false;
+    if (snapshot?.providerInstanceId && accountSnapshot?.sourceInstanceId !== snapshot.providerInstanceId) return false;
     if (accountSnapshot?.model && accountSnapshot.model !== snapshot?.model) return false;
     const age = Date.now() - accountSnapshot?.observedAt;
     return Number.isFinite(age) && age >= 0 && age <= (accountSnapshot?.cached ? 7 * 86400000 : ACCOUNT_EXPIRY_MS);
@@ -563,6 +583,7 @@
     version: "0.3.3",
     getThreadId,
     getThreadContext,
+    getComposerSelection,
     normalizeThreadId,
     primeSnapshots(entries) {
       if (removed || !Array.isArray(entries)) return false;
@@ -592,7 +613,7 @@
       const incomingId = normalizeThreadId(value.threadId);
       const currentId = getThreadId();
       if ((value.environmentId ?? null) !== (getThreadContext().environmentId ?? null)) return false;
-      if (currentId && incomingId && incomingId !== currentId) {
+      if ((incomingId && incomingId !== currentId) || (value.draft && currentId)) {
         refresh();
         return false;
       }

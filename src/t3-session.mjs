@@ -1,4 +1,5 @@
 import { DatabaseSync } from "node:sqlite";
+import { readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { parseQuotaFailure } from "./quota-policy.mjs";
@@ -23,11 +24,20 @@ export function resolveT3QuotaRestriction(threadId, providerThreadId, { home = p
   finally { db?.close(); }
 }
 
+const defaultHome = process.env.T3CODE_HOME || path.join(os.homedir(), ".t3");
+
+export function getLocalT3EnvironmentId(home = defaultHome) {
+  try {
+    return readFileSync(path.join(home, "userdata/environment-id"), "utf8").trim().toLowerCase() || null;
+  } catch (error) {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  }
+}
+
 // T3's app thread UUID is different from the provider's native conversation ID.
 // Read only the active binding; never substitute another conversation's logs.
-export function resolveT3Session(threadId, {
-  home = process.env.T3CODE_HOME || path.join(os.homedir(), ".t3"),
-} = {}) {
+export function resolveT3Session(threadId, { home = defaultHome } = {}) {
   if (!threadId) return null;
   let db;
   try {

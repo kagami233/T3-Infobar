@@ -4,12 +4,12 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomBytes, createHash } from "node:crypto";
 import { RolloutReader, validateThreadId, IMPORT_CODEX } from "./reader.mjs";
-import { GeminiTranscriptReader } from "./gemini-reader.mjs";
+import { formatGeminiModelBadge, GeminiTranscriptReader } from "./gemini-reader.mjs";
 import { Cdp, listTargets, port as defaultPort } from "./cdp.mjs";
 import { SnapshotCache } from "./snapshot-cache.mjs";
 import { addCompactionEstimate } from "./compaction-estimate.mjs";
 import { formatMetricsForTheme, buildT3Theme } from "./theme.mjs";
-import { resolveT3Session, resolveT3QuotaRestriction } from "./t3-session.mjs";
+import { getLocalT3EnvironmentId, resolveT3Session, resolveT3QuotaRestriction } from "./t3-session.mjs";
 import { applyQuotaRestriction } from "./quota-policy.mjs";
 import { createT3AccountReader } from "./t3-account.mjs";
 import { readT3Runtime, sessionKey } from "./t3-runtime.mjs";
@@ -57,8 +57,20 @@ const renderer = (
 ).join("\n;\n");
 const rendererRevision = createHash("sha256").update(renderer).digest("hex");
 
-async function resolveSnapshot(rawThreadId, client = null, previous = null) {
+async function resolveSnapshot(rawThreadId, client = null, previous = null, selection = null) {
   const binding = options.engine === "auto" ? resolveT3Session(rawThreadId) : null;
+  const provider = binding?.provider === "antigravity" ? "gemini" : binding?.provider;
+  const chosen = options.engine === "auto" && selection ? {
+    provider: selection.provider, providerInstanceId: selection.providerInstanceId, model: selection.model,
+  } : null;
+  if (chosen?.provider === "gemini") {
+    const model = selection.effort && !chosen.model.endsWith(`-${selection.effort}`)
+      ? `${chosen.model}-${selection.effort}` : chosen.model;
+    chosen.modelBadge = formatGeminiModelBadge(model);
+  }
+  if (chosen && (provider !== chosen.provider || binding?.providerInstanceId !== chosen.providerInstanceId)) {
+    return { ...chosen, threadId: rawThreadId, draft: !rawThreadId, status: "unavailable" };
+  }
   if (binding) {
     try {
       if (!binding.nativeId) throw new Error("当前聊天尚未创建原生会话记录。");
@@ -71,19 +83,19 @@ async function resolveSnapshot(rawThreadId, client = null, previous = null) {
         const data = await reader.snapshot(validateThreadId(binding.nativeId));
         return { ...await addCompactionEstimate(data, client, previous),
           threadId: rawThreadId, nativeThreadId: binding.nativeId,
-          providerInstanceId: binding.providerInstanceId, provider: "codex" };
+          providerInstanceId: binding.providerInstanceId, provider: "codex", ...chosen };
       }
       if (binding.provider === "antigravity" || binding.provider === "gemini") {
         const data = await geminiReader.snapshot(binding.nativeId);
+        const sameModel = !chosen || data.model === chosen.model || data.model?.startsWith(`${chosen.model}-`);
         return { ...data, threadId: rawThreadId, nativeThreadId: binding.nativeId,
-          quotaRestriction: resolveT3QuotaRestriction(rawThreadId, binding.providerThreadId),
-          providerInstanceId: binding.providerInstanceId, provider: "gemini" };
+          quotaRestriction: sameModel ? resolveT3QuotaRestriction(rawThreadId, binding.providerThreadId) : null,
+          providerInstanceId: binding.providerInstanceId, provider: "gemini", ...chosen };
       }
       throw new Error(`暂不支持此引擎：${binding.provider}`);
     } catch (error) {
       return { threadId: rawThreadId, providerInstanceId: binding.providerInstanceId,
-        provider: binding.provider === "antigravity" ? "gemini" : binding.provider,
-        status: "unavailable", warning: error.message };
+        provider, status: "unavailable", warning: error.message, ...chosen };
     }
   }
   const isImportedCodex = typeof rawThreadId === "string" && IMPORT_CODEX.test(rawThreadId);
@@ -125,7 +137,7 @@ async function resolveSnapshot(rawThreadId, client = null, previous = null) {
 
 async function generateThemeFile() {
   const data = await resolveSnapshot(options.thread);
-  const metrics = formatMetricsForTheme(data, data.accountUsage);
+  const metrics = formatMetricsForTheme(data);
   const theme = buildT3Theme(metrics);
   await fs.mkdir(path.dirname(options.output), { recursive: true });
   await fs.writeFile(options.output, JSON.stringify({ themeId: "codex-infobar", theme }, null, 2) + "\n", "utf8");
@@ -202,6 +214,7 @@ async function attach() {
   const remoteMetrics = new RemoteMetricsReader({ file: options["remote-metrics"] });
   const diskCache = new SnapshotCache();
   const sharedSnapshots = await diskCache.load();
+  let localEnvironmentId = null;
   let stopping = false;
   let lastIssue = "";
   async function cleanup() {
@@ -219,6 +232,7 @@ async function attach() {
     while (!stopping) {
       try {
         const targets = await listTargets(options.port);
+        if (targets.length && !localEnvironmentId) localEnvironmentId = getLocalT3EnvironmentId();
         const present = new Set(targets.map(t => t.id));
         for (const [id, client] of clients) {
           if (!present.has(id) || client.closed) {
@@ -249,23 +263,28 @@ async function attach() {
               }
             }
             await client.evaluate("window.__CODEX_METRICS_ACCOUNT__?.tickAutoReset?.()");
-            const context = await client.evaluate("window.__T3_METRICS_HUD__.getThreadContext()");
+            const { context, selection } = await client.evaluate(`(() => {
+              const hud = window.__T3_METRICS_HUD__;
+              return { context: hud.getThreadContext(), selection: hud.getComposerSelection() };
+            })()`);
             const id = context.threadId;
+            if (!id && !selection) continue;
             const key = sessionKey(context);
             const runtime = await readT3Runtime(client, context);
-            // An unknown environment is never allowed to fall back to local
-            // files, even when a native session UUID happens to be identical.
-            const remote = context.environmentId && context.environmentId !== runtime.localEnvironmentId;
+            const hostEnvironmentId = runtime.localEnvironmentId ?? localEnvironmentId;
+            const remote = context.environmentId && context.environmentId !== hostEnvironmentId;
+            const localSelection = !remote && selection?.environmentId === hostEnvironmentId ? selection : null;
+            if (!id && !localSelection) continue;
             const data = remote ? await remoteMetrics.read(client, runtime.snapshot)
-              : { ...await resolveSnapshot(context.appThreadId ?? id, client, sharedSnapshots.get(key)?.snapshot), ...context };
-            if (data.providerInstanceId) {
+              : { ...await resolveSnapshot(context.appThreadId ?? id, client, sharedSnapshots.get(key)?.snapshot, localSelection), ...context };
+            if (data.providerInstanceId && (id || context.environmentId)) {
               const accountContext = {
                 provider: data.provider, providerInstanceId: data.providerInstanceId,
                 model: data.model, threadId: id, environmentId: context.environmentId,
               };
               quotaClient = client;
               const remoteAccount = nativeQuotaAccount(data, accountContext) ?? await readAccount(client, accountContext);
-              const account = applyQuotaRestriction(await sharedQuota.reference(remoteAccount, accountContext, runtime.localEnvironmentId), data);
+              const account = applyQuotaRestriction(await sharedQuota.reference(remoteAccount, accountContext, hostEnvironmentId), data);
               await client.evaluate(`window.__T3_METRICS_HUD__?.updateAccount(${JSON.stringify(account)})`);
             } else {
               await client.evaluate("window.__T3_METRICS_HUD__?.updateAccount(null)");

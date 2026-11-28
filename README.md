@@ -18,11 +18,11 @@
 
 1. **T3 原生主题皮肤（零侵入 / 免重启，含输入框底部内嵌 SVG 状态条）**
    - 主题 ID：`codex-infobar`（源文件 [`theme/codex-infobar.json`](./theme/codex-infobar.json)）。
-   - 使用 `[data-slot="composer-host"]:not(:has(#t3-metrics-hud))::after` 在 T3 输入框底部内嵌 7 项指标的矢量状态条；当 CDP 动态组件 `#t3-metrics-hud` 挂载后，自动隐藏 CSS 静态条。
+   - 使用 `[data-slot="composer-host"]:not(:has(#t3-metrics-hud))::after` 在 T3 输入框底部显示静态会话指标，套餐额度与可用重置卡显示 `—`。CDP 动态组件挂载后会自动隐藏静态条。
 2. **CDP 动态注入组件（每 2 秒实时刷新 + 悬停详情 + 双引擎自动切换）**
    - [`src/renderer.js`](./src/renderer.js) 自动挂载至 T3 输入框容器 `[data-slot="composer-host"]` 或 `[data-chat-composer-form]`。
-   - 通过 T3 本地会话绑定读取对应引擎的原生日志；原生 Codex 使用 `~/.codex`，其他 Codex 连接使用各自的 shadow 目录。
-   - 套餐额度读取当前连接的 T3 用量记录。Gemini 按模型匹配五小时及每周额度池；单个会话的 token 数仅用于会话统计。
+   - 跟随输入框的引擎选择，并通过该环境的本地会话绑定读取对应引擎的原生日志。原生 Codex 使用 `~/.codex`，其他 Codex 连接使用各自的 shadow 目录。
+   - 套餐额度和重置卡数读取当前连接的 T3 账户用量快照。Gemini 按模型匹配五小时及每周额度池。会话日志用于会话统计。
    - Gemini 圆环旁仅显示倒计时。两种引擎的用量悬停文案均为 `套餐剩余：{剩余百分比}%；重置剩余时间：{倒计时}`；重置卡到期悬停仅显示到期日期时间与 `（北京时间）`。
    - 未提供额度时显示 `—`，重置时间过后显示“等待更新”。共享 Codex 连接不支持数值额度时提供“查看用量”链接。
 
@@ -85,7 +85,8 @@ npm run theme
 # 4. 启动本地交互预览页面
 npm run preview
 
-# 5. 通过 CDP 动态挂载到开启了调试端口的 T3 Code 客户端（默认端口 9342）
-# open -a "T3 Code" --args --remote-debugging-address=127.0.0.1 --remote-debugging-port=9342
+# 5. macOS 上完全退出 T3 Code 后，用「T3 Code + InfoBar」或脚本开启调试端口
+zsh src/launch-macos.sh
+# 手动启动采集器（未安装 LaunchAgent 时）
 node src/cli.mjs attach --port 9342 --position inside
 ```
