@@ -9,6 +9,8 @@ import { formatMetricsForTheme, buildT3Theme } from "../src/theme.mjs";
 const source = fs.readFileSync(new URL("../src/renderer.js", import.meta.url), "utf8");
 const THREAD = "01234567-89ab-cdef-0123-456789abcdef";
 const OTHER = "11234567-89ab-cdef-0123-456789abcdef";
+const LOCAL_ENV = "21234567-89ab-cdef-0123-456789abcdef";
+const REMOTE_ENV = "31234567-89ab-cdef-0123-456789abcdef";
 const T3_IMPORT = `import:codex_86e17730-7ab2-441b-a6a7-b265e5001c3d:${THREAD}`;
 
 class Element {
@@ -160,6 +162,74 @@ test("mounts inside T3 [data-slot='composer-host'] and renders Codex-InfoBar met
   assert.match(text, /≈72%/);
   assert.match(text, /78/);
   assert.match(text, /3张/);
+});
+
+test("Codex quota and cards only display for the active T3 account", () => {
+  const env = environment();
+  const session = codexSnapshot({ provider: "codex", providerInstanceId: "codex",
+    usageResets: [{ limitId: "codex", usedPercent: 56, resetsAt: 400000 }] });
+  const account = { provider: "codex", threadId: THREAD, observedAt: 1000, resetCardCount: 4,
+    usageResets: [{ limitId: "codex", usedPercent: 96, resetsAt: 400000 }] };
+  const bar = env.host.shadowRoot.children[1];
+  const quota = () => bar.children.find(item => item.getAttribute("data-metric") === "reset");
+  const cards = () => bar.children.find(item => item.getAttribute("data-metric") === "cards");
+
+  env.api.update(session);
+  assert.equal(quota().title, "套餐剩余：—；重置剩余时间：—");
+  env.api.updateAccount(account);
+  assert.equal(cards().title, "重置卡:—");
+  env.api.updateAccount({ ...account, sourceInstanceId: "codex" });
+  assert.match(quota().title, /套餐剩余：4%/);
+  assert.equal(cards().title, "重置卡:4张");
+  env.api.updateAccount(null);
+  assert.equal(quota().title, "套餐剩余：—；重置剩余时间：—");
+  assert.equal(cards().title, "重置卡:—");
+});
+
+test("switches Codex and Gemini HUDs on environment-scoped local thread routes", () => {
+  const env = environment(`/${LOCAL_ENV}/${THREAD}`);
+  assert.equal(env.api.getThreadId(), THREAD);
+  env.api.update(codexSnapshot({ environmentId: LOCAL_ENV, provider: "codex" }));
+  assert.equal(env.api.getStatus().provider, "codex");
+
+  env.navigate(`/${LOCAL_ENV}/${OTHER}`);
+  assert.equal(env.api.getThreadId(), OTHER);
+  env.api.update({ environmentId: LOCAL_ENV, threadId: OTHER, provider: "gemini", modelBadge: "Neon·High", status: "unavailable" });
+  assert.match(env.host.shadowRoot.content(), /Neon·High/);
+  env.navigate(`/${LOCAL_ENV}/${THREAD}`);
+  assert.equal(env.api.getStatus().provider, "codex");
+
+  env.navigate(`/${REMOTE_ENV}/${THREAD}?threadId=${OTHER}`);
+  assert.equal(env.api.getThreadId(), THREAD);
+  assert.equal(env.api.getThreadContext().environmentId, REMOTE_ENV);
+  assert.equal(env.api.update(codexSnapshot({ environmentId: LOCAL_ENV })), false);
+  assert.doesNotMatch(env.host.shadowRoot.content(), /24\.6 tok\/s/);
+});
+
+test("reads the committed local composer model selection before a message is sent", () => {
+  const env = environment(`/${LOCAL_ENV}/${THREAD}`);
+  let driver = "codex", instanceId = "codex", model = "gpt-6.2-sol";
+  let options = [];
+  const props = { environmentId: LOCAL_ENV, composerRef: { current: {
+    getSendContext: () => ({ selectedProvider: driver, selectedModelSelection: { instanceId, model, options }, prompt: "private" }),
+  } } };
+  const root = { memoizedProps: props };
+  root.stateNode = { current: root };
+  root.child = { stateNode: env.composer, return: root };
+  env.composer.__reactFiber$test = root.child;
+
+  assert.equal(JSON.stringify(env.api.getComposerSelection()), JSON.stringify({
+    environmentId: LOCAL_ENV, provider: "codex", providerInstanceId: "codex", model: "gpt-6.2-sol", effort: null,
+  }));
+  driver = "antigravity";
+  instanceId = "antigravity";
+  model = "gemini-4-neon";
+  options = [{ id: "thought_level", value: "high" }];
+  assert.equal(JSON.stringify(env.api.getComposerSelection()), JSON.stringify({
+    environmentId: LOCAL_ENV, provider: "gemini", providerInstanceId: "antigravity", model: "gemini-4-neon", effort: "high",
+  }));
+  props.environmentId = REMOTE_ENV;
+  assert.equal(env.api.getComposerSelection(), null);
 });
 
 test("unavailable shared quota offers the account usage page while keeping chat telemetry", () => {
@@ -375,4 +445,12 @@ test("buildT3Theme produces valid T3 Code theme JSON for both Gemini and Codex s
   assert.equal(formatMetricsForTheme(untrusted, null, 1000).remainingPercent, null);
   assert.equal(formatMetricsForTheme(untrusted, { provider: "codex", usageResets: [{ usedPercent: 22, resetsAt: 400000 }] }, 1000).remainingPercent, null);
   assert.equal(formatMetricsForTheme(untrusted, { provider: "gemini", usageResets: [{ usedPercent: 99.2, resetsAt: 400000 }] }, 1000).remainingPercent, 1);
+
+  const codex = codexSnapshot({ provider: "codex", providerInstanceId: "codex",
+    usageResets: [{ usedPercent: 56, resetsAt: 400000 }] });
+  const wrongAccount = { provider: "codex", sourceInstanceId: "shared", resetCardCount: 4 };
+  const staticMetrics = formatMetricsForTheme(codex, wrongAccount, 1000);
+  assert.equal(staticMetrics.remainingPercent, null);
+  assert.equal(staticMetrics.countdown, "—");
+  assert.equal(staticMetrics.slot7Value, "—");
 });

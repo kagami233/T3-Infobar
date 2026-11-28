@@ -36,8 +36,7 @@ export function formatMetricsForTheme(snapshot = {}, account = null, now = Date.
   const matchingAccount = account && (!account.provider || account.provider === snapshot.provider) &&
     (!account.sourceInstanceId || !snapshot.providerInstanceId || account.sourceInstanceId === snapshot.providerInstanceId);
   const resets = matchingAccount && Array.isArray(account.usageResets) && (!isGemini || account.provider === "gemini")
-    ? account.usageResets
-    : !isGemini && Array.isArray(snapshot?.usageResets) ? snapshot.usageResets : [];
+    ? account.usageResets : [];
   const primary = resets[0] ?? null;
   const remainingPercent = primary && numeric(primary.usedPercent) && primary.resetsAt * 1000 > now
     ? Math.max(0, Math.min(100, Math.round(100 - primary.usedPercent)))
@@ -47,7 +46,7 @@ export function formatMetricsForTheme(snapshot = {}, account = null, now = Date.
   const slot7Kind = isGemini ? "tier" : "cards";
   const slot7Value = isGemini
     ? (snapshot.modelBadge || "Argon·High")
-    : (Number.isSafeInteger(account?.resetCardCount) && account.resetCardCount >= 0
+    : (matchingAccount && Number.isSafeInteger(account.resetCardCount) && account.resetCardCount >= 0
         ? `${account.resetCardCount}张` : "—");
 
   return {
