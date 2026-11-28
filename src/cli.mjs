@@ -9,8 +9,12 @@ import { Cdp, listTargets, port as defaultPort } from "./cdp.mjs";
 import { SnapshotCache } from "./snapshot-cache.mjs";
 import { addCompactionEstimate } from "./compaction-estimate.mjs";
 import { formatMetricsForTheme, buildT3Theme } from "./theme.mjs";
-import { resolveT3Session } from "./t3-session.mjs";
+import { resolveT3Session, resolveT3QuotaRestriction } from "./t3-session.mjs";
+import { applyQuotaRestriction } from "./quota-policy.mjs";
 import { createT3AccountReader } from "./t3-account.mjs";
+import { readT3Runtime, sessionKey } from "./t3-runtime.mjs";
+import { SharedQuotaReader } from "./shared-quota.mjs";
+import { RemoteMetricsReader, nativeQuotaAccount } from "./remote-metrics.mjs";
 
 const here = new URL(".", import.meta.url);
 const args = process.argv.slice(2);
@@ -25,7 +29,8 @@ const options = {
 
 while (args.length) {
   const key = args.shift();
-  if (!["--thread", "--engine", "--port", "--position", "--account-snapshot", "--output"].includes(key) || !args.length) {
+  if (!["--thread", "--engine", "--port", "--position", "--account-snapshot", "--output",
+    "--shared-quota", "--remote-environment", "--remote-provider", "--local-provider", "--provider", "--remote-metrics"].includes(key) || !args.length) {
     throw new Error(`未知参数 ${key}`);
   }
   options[key.slice(2)] = args.shift();
@@ -71,6 +76,7 @@ async function resolveSnapshot(rawThreadId, client = null, previous = null) {
       if (binding.provider === "antigravity" || binding.provider === "gemini") {
         const data = await geminiReader.snapshot(binding.nativeId);
         return { ...data, threadId: rawThreadId, nativeThreadId: binding.nativeId,
+          quotaRestriction: resolveT3QuotaRestriction(rawThreadId, binding.providerThreadId),
           providerInstanceId: binding.providerInstanceId, provider: "gemini" };
       }
       throw new Error(`暂不支持此引擎：${binding.provider}`);
@@ -190,6 +196,10 @@ async function preview() {
 async function attach() {
   const clients = new Map();
   const readAccount = createT3AccountReader();
+  let quotaClient;
+  const sharedQuota = new SharedQuotaReader({ file: options["shared-quota"],
+    refreshSource: context => readAccount(quotaClient, context) });
+  const remoteMetrics = new RemoteMetricsReader({ file: options["remote-metrics"] });
   const diskCache = new SnapshotCache();
   const sharedSnapshots = await diskCache.load();
   let stopping = false;
@@ -239,24 +249,33 @@ async function attach() {
               }
             }
             await client.evaluate("window.__CODEX_METRICS_ACCOUNT__?.tickAutoReset?.()");
-            const id = await client.evaluate("window.__T3_METRICS_HUD__.getThreadId()");
-            const data = await resolveSnapshot(id, client, id ? sharedSnapshots.get(id)?.snapshot : null);
+            const context = await client.evaluate("window.__T3_METRICS_HUD__.getThreadContext()");
+            const id = context.threadId;
+            const key = sessionKey(context);
+            const runtime = await readT3Runtime(client, context);
+            // An unknown environment is never allowed to fall back to local
+            // files, even when a native session UUID happens to be identical.
+            const remote = context.environmentId && context.environmentId !== runtime.localEnvironmentId;
+            const data = remote ? await remoteMetrics.read(client, runtime.snapshot)
+              : { ...await resolveSnapshot(context.appThreadId ?? id, client, sharedSnapshots.get(key)?.snapshot), ...context };
             if (data.providerInstanceId) {
-              const account = await readAccount(client, {
+              const accountContext = {
                 provider: data.provider, providerInstanceId: data.providerInstanceId,
-                model: data.model, threadId: id,
-              });
+                model: data.model, threadId: id, environmentId: context.environmentId,
+              };
+              quotaClient = client;
+              const remoteAccount = nativeQuotaAccount(data, accountContext) ?? await readAccount(client, accountContext);
+              const account = applyQuotaRestriction(await sharedQuota.reference(remoteAccount, accountContext, runtime.localEnvironmentId), data);
               await client.evaluate(`window.__T3_METRICS_HUD__?.updateAccount(${JSON.stringify(account)})`);
             } else {
               await client.evaluate("window.__T3_METRICS_HUD__?.updateAccount(null)");
             }
-            const key = id || data.threadId;
-            if (key) {
+            if (id) {
               sharedSnapshots.delete(key);
-              sharedSnapshots.set(key, { snapshot: { ...data, threadId: key }, receivedAt: Date.now() });
+              sharedSnapshots.set(key, { snapshot: data, receivedAt: Date.now() });
               if (sharedSnapshots.size > 64) sharedSnapshots.delete(sharedSnapshots.keys().next().value);
             }
-            await client.evaluate(`window.__T3_METRICS_HUD__.update(${JSON.stringify({ ...data, threadId: key })})`);
+            await client.evaluate(`window.__T3_METRICS_HUD__.update(${JSON.stringify(data)})`);
           } catch (error) {
             if (!error.transient) {
               try { await client.evaluate("window.__T3_METRICS_HUD__?.remove()"); } catch {}
@@ -281,7 +300,13 @@ async function attach() {
 }
 
 try {
-  if (mode === "snapshot") {
+  if (mode === "share-quota") {
+    const reader = new SharedQuotaReader({ file: options["shared-quota"] });
+    console.log(JSON.stringify(await reader.configure({
+      targetEnvironmentId: options["remote-environment"], targetProviderInstanceId: options["remote-provider"],
+      sourceProviderInstanceId: options["local-provider"], provider: options.provider,
+    }), null, 2));
+  } else if (mode === "snapshot") {
     console.log(JSON.stringify(await resolveSnapshot(options.thread), null, 2));
   } else if (mode === "theme") {
     await generateThemeFile();
@@ -290,7 +315,7 @@ try {
   } else if (mode === "attach") {
     await attach();
   } else {
-    throw new Error("用法：node src/cli.mjs theme|preview|snapshot|attach [--thread ID] [--engine auto|gemini|codex] [--position above|below|inside] [--port 9342]");
+    throw new Error("用法：node src/cli.mjs theme|preview|snapshot|attach|share-quota [--thread ID] [--engine auto|gemini|codex] [--position above|below|inside] [--port 9342]");
   }
 } catch (error) {
   console.error(error.message);

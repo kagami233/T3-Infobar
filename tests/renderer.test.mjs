@@ -236,12 +236,12 @@ test("Gemini ignores estimated transcript quota and account data from another co
   assert.match(resets()[1].title, /套餐剩余：74%/);
   env.tick(90001);
   env.api.update(gemini);
-  assert.match(resets()[0].title, /^套餐剩余：1%；重置剩余时间：[^\n]+$/);
+  assert.match(resets()[0].title, /^套餐剩余：—；重置剩余时间：[^\n]+$/);
   assert.doesNotMatch(resets()[0].title, /缓存|记录时间/);
   assert.equal(resets()[0].children[0].className, "quota-wrap");
   assert.match(resets()[0].children[1].textContent, /^\d+天 /);
   assert.doesNotMatch(resets().map(x => x.content()).join(" "), /缓存|5小时窗口|7天窗口/);
-  env.api.updateAccount({ ...account, usageResets: [{ ...account.usageResets[0], resetsAt: 0.5 }, account.usageResets[1]] });
+  env.api.updateAccount({ ...account, observedAt: 91001, usageResets: [{ ...account.usageResets[0], resetsAt: 0.5 }, account.usageResets[1]] });
   assert.match(resets()[0].title, /等待更新/);
   assert.match(resets()[1].title, /套餐剩余：74%/);
   env.api.updateAccount(account);
@@ -296,10 +296,39 @@ test("dual-engine renderer auto-switches slot 7 between Gemini model badge and C
   assert.equal(env.api.getStatus().provider, "codex");
 });
 
+test("remote imported conversations retain app IDs and isolate identical native IDs on different machines", () => {
+  const first = "21234567-89ab-cdef-0123-456789abcdef";
+  const second = "31234567-89ab-cdef-0123-456789abcdef";
+  const env = environment(`/#/${first}/${encodeURIComponent(T3_IMPORT)}`);
+  assert.deepEqual(JSON.parse(JSON.stringify(env.api.getThreadContext())), {
+    environmentId: first, appThreadId: T3_IMPORT, threadId: THREAD,
+  });
+  assert.equal(env.api.update(codexSnapshot({ environmentId: first, averageOutputTps: 12.3 })), true);
+  assert.match(env.host.shadowRoot.content(), /12\.3 tok\/s/);
+  env.navigate(`/#/${second}/${encodeURIComponent(T3_IMPORT)}`);
+  assert.doesNotMatch(env.host.shadowRoot.content(), /12\.3 tok\/s/);
+  assert.equal(env.api.update(codexSnapshot({ environmentId: first })), false);
+  assert.equal(env.api.update(codexSnapshot({ environmentId: second, averageOutputTps: 45.6 })), true);
+  env.api.updateAccount({ environmentId: first, observedAt: 1000,
+    usageResets: [{ limitId: "codex", usedPercent: 22, resetsAt: 400000 }] });
+  const quota = env.host.shadowRoot.children[1].children.find(c => c.getAttribute("data-metric") === "reset");
+  assert.match(quota.title, /套餐剩余：—/);
+  env.navigate(`/#/${first}/${encodeURIComponent(T3_IMPORT)}`);
+  assert.match(env.host.shadowRoot.content(), /12\.3 tok\/s/);
+  assert.doesNotMatch(env.host.shadowRoot.content(), /45\.6 tok\/s/);
+});
+
 test("resolves T3 import:codex thread IDs in URL, sidebar [data-thread-item], and reader", () => {
   assert.equal(validateThreadId(T3_IMPORT), THREAD);
+  assert.equal(validateThreadId(`import:codex:${THREAD}`), THREAD);
   const env = environment(`/threads/${encodeURIComponent(T3_IMPORT)}`);
   assert.equal(env.api.getThreadId(), THREAD);
+
+  for (const [id, expected] of [[`import:codex:${OTHER}`, OTHER], ["thread:subagent:df956cbe4a519d50", "thread:subagent:df956cbe4a519d50"]]) {
+    env.navigate(`/#/${THREAD}/${encodeURIComponent(id)}`);
+    assert.equal(env.api.getThreadContext().appThreadId, id);
+    assert.equal(env.api.getThreadId(), expected);
+  }
 
   env.navigate("/workspace");
   env.setT3ActiveThread(`import:codex_86e17730-7ab2-441b-a6a7-b265e5001c3d:${OTHER}`);
