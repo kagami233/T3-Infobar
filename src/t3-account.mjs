@@ -139,7 +139,8 @@ export function createT3AccountReader({ rpc = callT3Rpc, now = Date.now } = {}) 
     const previous = entries.get(key);
     if (previous && now() - previous.at < 15000) return previous.value;
     let value;
-    if (context.provider === "gemini" && context.environmentId && context.providerInstanceId) {
+    if ((context.provider === "codex" || context.provider === "gemini") &&
+        context.environmentId && context.providerInstanceId) {
       const refreshKey = JSON.stringify([context.environmentId, context.providerInstanceId]);
       if (!refreshes.has(refreshKey) || now() - refreshes.get(refreshKey) >= 60000) {
         refreshes.set(refreshKey, now());

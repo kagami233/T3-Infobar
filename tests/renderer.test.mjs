@@ -56,6 +56,7 @@ class Element {
 
 function environment(path = `/threads/${THREAD}`) {
   let now = 1000;
+  let timerId = 0;
   const timers = new Map();
   const listeners = new Map();
   const parent = new Element("main");
@@ -76,6 +77,9 @@ function environment(path = `/threads/${THREAD}`) {
     querySelectorAll(selector) {
       if (selector.includes("[data-thread-item]")) return t3SidebarRows;
       if (composerVisible && selector === '[data-slot="composer-host"]') return [composer];
+      if (selector === "#t3-metrics-hud, #codex-metrics-hud") {
+        return nodes.filter(node => node.isConnected && ["t3-metrics-hud", "codex-metrics-hud"].includes(node.id));
+      }
       return [];
     },
   };
@@ -87,16 +91,18 @@ function environment(path = `/threads/${THREAD}`) {
     innerWidth: 1000,
     getComputedStyle() { return { display: "block", visibility: "visible" }; },
     Date: { now: () => now, parse: Date.parse },
-    setInterval(callback) { const id = timers.size + 1; timers.set(id, callback); return id; },
+    setInterval(callback) { timers.set(++timerId, callback); return timerId; },
     clearInterval(id) { timers.delete(id); },
   });
   vm.runInContext(source, context);
   return {
     window,
+    document,
     parent,
     composer,
     get api() { return window.__T3_METRICS_HUD__; },
     get host() { return nodes.filter(node => node.id === "t3-metrics-hud").at(-1); },
+    reinject() { vm.runInContext(source, context); },
     navigate(next) {
       window.location.href = `http://127.0.0.1:3000${next}`;
       for (const callback of timers.values()) callback();
@@ -230,6 +236,43 @@ test("reads the committed local composer model selection before a message is sen
   }));
   props.environmentId = REMOTE_ENV;
   assert.equal(env.api.getComposerSelection(), null);
+});
+
+test("reinjecting removes orphaned hosts and retires the previous renderer", () => {
+  const env = environment();
+  const previous = env.api;
+  const orphan = env.host;
+  const legacy = env.document.createElement("div");
+  legacy.id = "codex-metrics-hud";
+  env.parent.appendChild(legacy);
+  delete env.window.__T3_METRICS_HUD__;
+  delete env.window.__CODEX_METRICS_HUD__;
+
+  env.reinject();
+  assert.equal(orphan.isConnected, false);
+  assert.equal(legacy.isConnected, false);
+  assert.deepEqual(env.composer.children, [env.host]);
+
+  let accountRemovals = 0;
+  env.window.__CODEX_METRICS_ACCOUNT__ = { remove() { accountRemovals++; } };
+  env.tick(500);
+  assert.equal(previous.getStatus().removed, true);
+  assert.deepEqual(env.composer.children, [env.host]);
+  assert.equal(accountRemovals, 0);
+});
+
+test("refresh removes a duplicate host while keeping the live metrics", () => {
+  const env = environment();
+  const active = env.host;
+  env.api.update(codexSnapshot());
+  const duplicate = env.document.createElement("div");
+  duplicate.id = active.id;
+  env.composer.appendChild(duplicate);
+
+  env.api.updateAccount({ observedAt: 1000, resetCardCount: 4 });
+  assert.deepEqual(env.composer.children, [active]);
+  assert.match(active.shadowRoot.content(), /98\.4%/);
+  assert.match(active.shadowRoot.content(), /4张/);
 });
 
 test("unavailable shared quota offers the account usage page while keeping chat telemetry", () => {

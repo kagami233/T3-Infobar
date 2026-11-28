@@ -3,6 +3,7 @@
   const KEY = "__T3_METRICS_HUD__";
   const LEGACY_KEY = "__CODEX_METRICS_HUD__";
   const HOST_ID = "t3-metrics-hud";
+  const HOST_SELECTOR = `#${HOST_ID}, #codex-metrics-hud`;
   const EXPIRY_MS = 30000;
   const ACCOUNT_EXPIRY_MS = 90000;
   const UUID = "([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})";
@@ -516,6 +517,14 @@
 
   function refresh() {
     if (removed) return;
+    if (window[KEY] !== api) {
+      api.remove();
+      return;
+    }
+    // An earlier injection can leave a host behind after its API is lost.
+    for (const existing of document.querySelectorAll(HOST_SELECTOR)) {
+      if (existing !== host) existing.remove();
+    }
     const threadId = getThreadId();
     const key = sessionKey();
     const composer = findComposer();
@@ -651,8 +660,8 @@
       };
     },
     remove() {
+      if (removed) return true;
       removed = true;
-      window.__CODEX_METRICS_ACCOUNT__?.remove?.();
       clearInterval(timer);
       observer?.disconnect();
       snapshots.clear();
@@ -663,8 +672,11 @@
       snapshot = null;
       accountSnapshot = null;
       mounted = false;
-      if (window[KEY] === api) delete window[KEY];
       if (window[LEGACY_KEY] === api) delete window[LEGACY_KEY];
+      if (window[KEY] === api) {
+        delete window[KEY];
+        window.__CODEX_METRICS_ACCOUNT__?.remove?.();
+      }
       return true;
     },
   };
