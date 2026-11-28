@@ -18,6 +18,23 @@ const REMOTE = [
   ["148 108 42 / 0.12", "229 179 82 / 0.15"],
 ];
 
+const SELECTION = `li[data-thread-item]:has(> [data-sidebar-row][aria-current="page"]) {
+  /* Let the outline extend beyond the row without clipping at the list item. */
+  content-visibility: visible;
+}
+li[data-thread-item] > [data-sidebar-row][data-sidebar-parent="shelf:working"] {
+  /* Keep the device tint equally opaque before and after selection. */
+  opacity: 1;
+}
+li[data-thread-item] > [data-sidebar-row][aria-current="page"] {
+  background-color: transparent;
+  outline: 2px solid #000;
+  outline-offset: 0;
+}
+li[data-thread-item] > [data-sidebar-row][aria-current="page"]:not(:focus-visible) {
+  box-shadow: none;
+}`;
+
 function rule(id, [light, dark]) {
   return `li[data-thread-item^="${id}:"] [data-sidebar-row^="${id}:"] {
   --t3-infobar-device-tint: light-dark(rgb(${light}), rgb(${dark}));
@@ -40,7 +57,7 @@ export function withSidebarColors(css, localId, visibleIds) {
   ids.delete(localId);
 
   const rules = [rule(localId, LOCAL), ...[...ids].map((id, index) => rule(id, REMOTE[index % REMOTE.length]))];
-  const block = [START, ...rules, END].join("\n");
+  const block = [START, ...rules, SELECTION, END].join("\n");
   return start < 0
     ? `${css.trimEnd()}\n\n${block}\n`
     : css.slice(0, start) + block + css.slice(end + END.length);

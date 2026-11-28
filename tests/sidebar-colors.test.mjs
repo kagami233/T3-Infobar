@@ -7,7 +7,7 @@ const CORAL = "20000000-0000-4000-8000-000000000000";
 const CYAN = "30000000-0000-4000-8000-000000000000";
 const NEW = "00000000-0000-4000-8000-000000000000";
 
-test("colors exact device rows and leaves native state backgrounds available", () => {
+test("colors exact device rows without replacing their background color", () => {
   const original = ".sidebar { color: white; }\n";
   const css = withSidebarColors(original, LOCAL, [CYAN, CORAL, LOCAL, CORAL, 'bad"]{}']);
   assert.ok(css.startsWith(original));
@@ -21,8 +21,19 @@ test("colors exact device rows and leaves native state backgrounds available", (
     "light-dark(rgb(42 192 201 / 0.34), rgb(84 221 229 / 0.31))",
   ]);
   assert.match(css, /background-image: linear-gradient/);
-  assert.doesNotMatch(css, /background-color|bad/);
+  const deviceRules = [...css.matchAll(/^li\[data-thread-item\^=[^}]+}/gm)];
+  assert.equal(deviceRules.length, 3);
+  for (const [entry] of deviceRules) assert.doesNotMatch(entry, /background-color/);
+  assert.doesNotMatch(css, /bad/);
   assert.equal(withSidebarColors(css, LOCAL, [CORAL, CYAN]), css);
+});
+
+test("marks the current row with an outer outline and keeps its tint visible", () => {
+  const css = withSidebarColors("", LOCAL, [CORAL]);
+  assert.match(css, /> \[data-sidebar-row\]\[aria-current="page"\] \{\s+background-color: transparent;\s+outline: 2px solid #000;\s+outline-offset: 0;/);
+  assert.match(css, /:has\(> \[data-sidebar-row\]\[aria-current="page"\]\) \{[^}]+content-visibility: visible;/);
+  assert.match(css, /\[data-sidebar-parent="shelf:working"\] \{[^}]+opacity: 1;/);
+  assert.match(css, /\[aria-current="page"\]:not\(:focus-visible\) \{\s+box-shadow: none;/);
 });
 
 test("retains assigned colors when new environments appear and old ones are hidden", () => {
