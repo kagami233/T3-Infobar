@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { selectT3Account } from "../src/t3-account.mjs";
+import { createT3AccountReader, selectT3Account } from "../src/t3-account.mjs";
 
 const now = Date.now();
 const context = { provider: "codex", providerInstanceId: "shared", model: "gpt-6.1-sol", defaultCodexHome: "C:\\User\\.codex" };
@@ -52,6 +52,48 @@ test("supported selected provider takes priority; Gemini clears Codex account da
   assert.equal(result.resetCardCount, 1);
   assert.equal(result.sourceBadge, null);
   assert.equal(selectT3Account(p, { ...context, provider: "gemini" }, now), null);
+});
+
+test("the remote Codex connection refreshes both its quota and reset cards", async () => {
+  const remoteContext = { ...context, environmentId: "remote-machine", providerInstanceId: "codex" };
+  const client = { evaluate() { assert.fail("Expected the selected environment's quota RPC"); } };
+  const calls = [];
+  let clock = now;
+  let redeemed = false;
+  let provider = { ...providers()[1], environmentId: remoteContext.environmentId };
+  provider.usageLimits.resetCredits.availableCount = 4;
+  const read = createT3AccountReader({
+    now: () => clock,
+    async rpc(clientArg, environmentId, method, payload) {
+      assert.equal(clientArg, client);
+      assert.equal(environmentId, remoteContext.environmentId);
+      assert.deepEqual(payload, { instanceId: remoteContext.providerInstanceId });
+      calls.push(method);
+      if (method === "infobar.refreshQuota" && redeemed) {
+        const updated = providers()[1];
+        updated.usageLimits = { ...updated.usageLimits, checkedAt: new Date(clock).toISOString(),
+          windows: [{ ...updated.usageLimits.windows[0], usedPercent: 0 }] };
+        provider = { ...updated, environmentId };
+      }
+      return [provider];
+    },
+  });
+
+  const before = await read(client, remoteContext);
+  assert.equal(before.resetCardCount, 4);
+  assert.equal(before.usageResets[0].usedPercent, 29);
+
+  redeemed = true;
+  clock = now + 1000;
+  assert.equal(await read(client, remoteContext), before);
+  clock = now + 15000;
+  assert.equal((await read(client, remoteContext)).resetCardCount, 4);
+  clock = now + 60000;
+  const after = await read(client, remoteContext);
+  assert.equal(after.resetCardCount, 3);
+  assert.equal(after.usageResets[0].usedPercent, 0);
+  assert.equal(after.observedAt, clock);
+  assert.equal(calls.filter(method => method === "infobar.refreshQuota").length, 2);
 });
 
 function geminiProvider() {
