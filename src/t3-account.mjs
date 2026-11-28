@@ -142,9 +142,13 @@ export function createT3AccountReader({ rpc = callT3Rpc, now = Date.now } = {}) 
     let refresh = refreshes.get(refreshKey);
     const previous = entries.get(key);
     const readAt = now();
-    if (previous && readAt - previous.at < 15000 && previous.revision === refresh?.revision) return previous.value;
+    const refreshDue = refreshKey && (!refresh || readAt >= (refresh.retryAt ?? refresh.at + 60000));
+    if (!refreshDue && previous && readAt - previous.at < 15000 && previous.revision === refresh?.revision) {
+      return previous.value;
+    }
     let value;
-    if (refreshKey && (!refresh || readAt - refresh.at >= 60000)) {
+    if (refreshDue) {
+      const isRetry = refresh?.retryAt !== undefined;
       const next = { at: readAt, revision: refresh?.revision };
       refreshes.set(refreshKey, next);
       refresh = next;
@@ -155,7 +159,10 @@ export function createT3AccountReader({ rpc = callT3Rpc, now = Date.now } = {}) 
       if (codex) {
         // The desktop polls windows serially. Invalidate their quota caches once
         // the refresh completes, without holding up the current collection pass.
-        void request.then(() => { next.revision = Symbol(); }, () => {});
+        void request.then(
+          () => { next.revision = Symbol(); },
+          () => { if (!isRetry) next.retryAt = now() + 15000; },
+        );
       } else {
         try { await request; } catch {}
       }

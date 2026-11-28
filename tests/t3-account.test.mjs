@@ -113,6 +113,38 @@ test("a slow Codex refresh leaves both windows responsive and updates quota and 
   assert.equal(calls.filter(method => method === "infobar.refreshQuota").length, 2);
 });
 
+test("a failed Codex refresh gets one quick retry before returning to the normal interval", async () => {
+  const remoteContext = { ...context, environmentId: "remote-machine", providerInstanceId: "codex" };
+  const client = { evaluate() { assert.fail("Expected the selected environment's quota RPC"); } };
+  const provider = { ...providers()[1], environmentId: remoteContext.environmentId };
+  provider.usageLimits.resetCredits.availableCount = 4;
+  const attempts = [];
+  let clock = now;
+  const read = createT3AccountReader({
+    now: () => clock,
+    async rpc(_client, _environment, method) {
+      if (method === "infobar.refreshQuota") {
+        attempts.push(clock - now);
+        if (attempts.length < 4) throw new Error("T3 telemetry request timed out");
+        provider.usageLimits.checkedAt = new Date(clock).toISOString();
+        provider.usageLimits.windows[0].usedPercent = 0;
+        provider.usageLimits.resetCredits.availableCount = 3;
+      }
+      return [provider];
+    },
+  });
+
+  for (const elapsed of [0, 14999, 15000, 30000, 74999, 75000, 89999]) {
+    clock = now + elapsed;
+    assert.equal((await read(client, remoteContext)).resetCardCount, 4);
+  }
+  clock = now + 90000;
+  const updated = await read(client, remoteContext);
+  assert.equal(updated.resetCardCount, 3);
+  assert.equal(updated.usageResets[0].usedPercent, 0);
+  assert.deepEqual(attempts, [0, 15000, 75000, 90000]);
+});
+
 test("the T3 RPC and CDP budgets permit a quota refresh taking six seconds", async () => {
   let elapsed = 0;
   const environmentId = "remote-machine";
