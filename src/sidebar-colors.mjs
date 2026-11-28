@@ -10,10 +10,10 @@ import { getLocalT3EnvironmentId } from "./t3-session.mjs";
 const run = promisify(execFile);
 const START = "/* t3-infobar-device-colors:start */";
 const END = "/* t3-infobar-device-colors:end */";
-const LOCAL = ["69 77 87 / 0.09", "169 176 185 / 0.09"];
+const LOCAL = ["101 114 134 / 0.13", "189 195 210 / 0.14"];
 const REMOTE = [
-  ["65 117 207 / 0.13", "103 154 245 / 0.16"],
-  ["127 89 198 / 0.13", "170 126 246 / 0.16"],
+  ["252 106 92 / 0.36", "255 143 124 / 0.35"],
+  ["42 192 201 / 0.34", "84 221 229 / 0.31"],
   ["32 125 119 / 0.12", "81 191 175 / 0.15"],
   ["148 108 42 / 0.12", "229 179 82 / 0.15"],
 ];
